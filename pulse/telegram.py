@@ -12,11 +12,13 @@ from datetime import datetime, timedelta, timezone
 
 from . import db
 from .config import DATA, TG_CREDS_PATH, TG_DIALOGS_PATH, TG_QR_PAGE_PATH, TG_SESSION_PATH
+from .promises import is_promise
 from .text import first_line_title
 
 BACKFILL_DAYS = 3
 PER_CHAT_LIMIT = 300
 REPLY_LOOKUP_DEPTH = 300
+QUICK_DIALOGS = 100  # диалоги идут от свежих к старым: новое всегда в начале списка
 QR_REFRESH_SECONDS = 25  # не берём срок из ответа: он зависит от часов компьютера
 QR_PAGE = """<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta http-equiv="refresh" content="4">
@@ -248,9 +250,19 @@ def chat_kind(dialog):
     return "группа"
 
 
+async def read_tops(client, limit):
+    """Последнее сообщение диалогов одним запросом: так видно, в каких чатах есть новое."""
+    tops = {}
+    async for dialog in client.iter_dialogs(limit=limit):
+        tops[str(dialog.id)] = dialog.message.id if dialog.message else 0
+    return tops
+
+
 async def save_dialogs(client):
     dialogs = []
+    tops = {}
     async for dialog in client.iter_dialogs(limit=500):
+        tops[str(dialog.id)] = dialog.message.id if dialog.message else 0
         dialogs.append({
             "id": dialog.id, "name": dialog.name or "Без названия", "kind": chat_kind(dialog),
             "unread": dialog.unread_count,
@@ -258,7 +270,7 @@ async def save_dialogs(client):
             "archived": bool(dialog.archived),
         })
     TG_DIALOGS_PATH.write_text(json.dumps(dialogs, ensure_ascii=False), "utf-8")
-    return dialogs
+    return tops
 
 
 def load_dialogs():
@@ -275,12 +287,12 @@ def message_url(chat_id, entity, message_id):
     return ""
 
 
-def message_to_item(chat, entity, message, sender_name):
+def message_to_item(chat, entity, message, sender_name, outgoing=False):
     """Переводит сообщение Telethon в элемент Пульса."""
     text = (message.message or "").strip()
     is_channel = chat.get("kind") == "канал"  # каналы это новости, а группы и личные чаты приватны
     return {
-        "uid": f"tg-{chat['id']}-{message.id}", "kind": "post" if is_channel else "message",
+        "uid": f"tg-{chat['id']}-{message.id}", "kind": "outgoing" if outgoing else "post" if is_channel else "message",
         "source_type": "tg_public" if is_channel else "tg_private",
         "source_name": chat["name"], "title": first_line_title(text), "body": text[:2000],
         "url": message_url(chat["id"], entity, message.id), "author": sender_name,
@@ -325,12 +337,16 @@ async def fetch_chat(client, chat, last_id, needs_lookup=False):
     newest = last_id or 0
     my_last = 0  # после вашего ответа более ранние сообщения уже не ждут реакции
     async for message in client.iter_messages(entity, min_id=last_id or 0, limit=PER_CHAT_LIMIT):
+        newest = max(newest, message.id)  # тихий чат тоже получает отметку, иначе его перечитывают каждый раз
         if message.date < cutoff:
             break
-        newest = max(newest, message.id)
+        text = (message.message or "").strip()
         if message.out:
             my_last = max(my_last, message.id)
-        if message.out or not (message.message or "").strip():
+            if chat.get("kind") != "канал" and is_promise(text):
+                items.append(message_to_item(chat, entity, message, "", outgoing=True))
+            continue
+        if not text:
             continue
         sender = await message.get_sender()
         items.append(message_to_item(chat, entity, message, sender_label(sender)))
@@ -342,16 +358,27 @@ async def fetch_chat(client, chat, last_id, needs_lookup=False):
     return items, newest, my_last or None
 
 
-async def collect_async(client, chats, cursors, asked=()):
+def has_news(chat_id, tops, cursors, asked):
+    """Быстрый проход читает только чаты, где последнее сообщение новее отметки."""
+    key = str(chat_id)
+    if key not in cursors or key not in asked:
+        return True  # чат только что добавили
+    return tops.get(key, 0) > cursors[key]
+
+
+async def collect_async(client, chats, cursors, asked=(), full=False):
     results = []
     await client.connect()
     try:
         if not await client.is_user_authorized():
             raise RuntimeError("сессия недействительна, нужен повторный вход")
-        await save_dialogs(client)
+        tops = await save_dialogs(client) if full else await read_tops(client, QUICK_DIALOGS)
         for chat in chats:
+            if not full and not has_news(chat["id"], tops, cursors, asked):
+                continue
             try:
-                items, newest, my_last = await fetch_chat(client, chat, cursors.get(str(chat["id"])), str(chat["id"]) not in asked)
+                last_id = None if full else cursors.get(str(chat["id"]))
+                items, newest, my_last = await fetch_chat(client, chat, last_id, full or str(chat["id"]) not in asked)
                 results.append((chat, items, newest, my_last, None))
             except Exception as error:
                 results.append((chat, [], None, None, f"{type(error).__name__}: {str(error)[:160]}"))
@@ -360,7 +387,8 @@ async def collect_async(client, chats, cursors, asked=()):
     return results
 
 
-def collect(conn, cfg):
+def collect(conn, cfg, full=False):
+    """Быстрый проход смотрит одну страницу диалогов, полный перечитывает все чаты за три дня."""
     if not is_connected():
         return 0
     chats = cfg["tg_private"]
@@ -368,7 +396,7 @@ def collect(conn, cfg):
     my_last_seen = db.kv_get(conn, "tg_my_last", {})
     asked = set(db.kv_get(conn, "tg_replies_asked", []))
     try:
-        results = asyncio.run(collect_async(make_client(), chats, cursors, asked))
+        results = asyncio.run(collect_async(make_client(), chats, cursors, asked, full))
     except Exception as error:
         db.record_source(conn, "tg_private", "Telegram: аккаунт", "tg_private", error=f"{type(error).__name__}: {str(error)[:160]}")
         return 0
@@ -377,7 +405,7 @@ def collect(conn, cfg):
         for item in items:
             db.upsert_item(conn, item)
         if newest:
-            cursors[str(chat["id"])] = newest
+            cursors[str(chat["id"])] = max(newest, cursors.get(str(chat["id"]), 0))
         if my_last is not None:  # ноль тоже ответ: значит, вы здесь ещё не писали
             my_last_seen[str(chat["id"])] = max(my_last, my_last_seen.get(str(chat["id"]), 0))
             asked.add(str(chat["id"]))

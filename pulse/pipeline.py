@@ -1,15 +1,18 @@
-"""Один полный проход: собрать, оценить, подготовить материал для сводки Claude."""
+"""Проходы сбора: быстрый по расписанию и полный раз в сутки."""
 import json
+import subprocess
 import threading
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from . import analysis, db, deadlines, feeds, local_ai, obsidian, replies, telegram
-from .agenda import CHAT_SECTION
+from . import analysis, db, deadlines, feeds, local_ai, notify, obsidian, promises, replies, telegram
+from .agenda import CHAT_SECTION, done_tasks
 from .config import BRIEF_PATH, EXPORT_PATH, load_config, muted_chats
 
 _running = threading.Lock()
 _stage = {"text": "", "data_ready": False, "error": ""}
+FULL_MAX_HOURS = 36
+DONE_LOG_SIZE = 500
 
 BRIEF_FORMAT = """{
   "date": "YYYY-MM-DD",
@@ -27,11 +30,11 @@ def stage():
     return dict(_stage) if _running.locked() else {"text": "", "data_ready": False}
 
 
-def run_in_background():
+def run_in_background(full=False):
     """Сбор из кнопки: ошибка не должна пропасть молча."""
     try:
         _stage["error"] = ""
-        run_collection()
+        run_collection(full=full)
     except Exception as error:
         _stage["error"] = f"{type(error).__name__}: {error}"[:200]
 
@@ -40,42 +43,93 @@ def last_error():
     return _stage["error"]
 
 
-def run_collection():
-    """Возвращает статистику прохода или None, если проход уже идёт."""
+def is_due(mark, minutes, now):
+    return not mark or now - datetime.fromisoformat(mark) >= timedelta(minutes=minutes)
+
+
+def full_is_due(mark, hour, now):
+    """Глубокий проход раз в сутки, в первую проверку после заданного часа."""
+    if not mark:
+        return True
+    last = datetime.fromisoformat(mark)
+    return now - last >= timedelta(hours=FULL_MAX_HOURS) or (last.date() < now.date() and now.hour >= hour)
+
+
+def plan(marks, cfg, now, force=False, full=False):
+    """Что пора обновить. Кнопка обновляет всё, кроме глубокого прохода."""
+    full = full or full_is_due(marks.get("full"), cfg["full_collect_hour"], now)
+    pick = lambda key, minutes: full or force or is_due(marks.get(key), minutes, now)
+    return {"full": full, "chats": pick("chats", cfg["chat_interval_min"]),
+            "news": pick("news", cfg["news_interval_min"]), "model": pick("model", cfg["model_interval_min"])}
+
+
+def note_done(conn, cfg):
+    """В файле нет даты выполнения, поэтому запоминаем день, когда отметка появилась."""
+    log = db.kv_get(conn, "done_log", {})
+    day = "" if not log else date.today().isoformat()  # первый проход только запоминает, что уже было
+    for task in done_tasks(cfg, DONE_LOG_SIZE):
+        log.setdefault(task["title"], day)
+    db.kv_set(conn, "done_log", log)
+
+
+def collect_data(conn, cfg, todo):
+    """Сеть и оценки. Модель идёт отдельно, потому что она самая медленная часть."""
+    stats = {"mode": "full" if todo["full"] else "quick"}
+    set_stage("Полное обновление чатов" if todo["full"] else "Обновляю новости и чаты" if todo["news"] else "Проверяю чаты")
+    if todo["news"]:
+        move_channels_to_news(conn)
+        stats["obsidian"] = obsidian.collect(conn, cfg)
+        note_done(conn, cfg)
+        conn.commit()
+        stats["news"] = feeds.collect(conn, cfg)
+    if todo["chats"]:
+        stats["telegram"] = telegram.collect(conn, cfg, todo["full"])
+        if stats["telegram"] or todo["full"]:
+            mark_bots(conn)
+        conn.commit()
+    if todo["news"] or stats.get("telegram"):
+        stats["analyzed"] = analysis.run(conn, cfg)
+        view = analysis.today_view(conn, cfg)
+        queued = [db.row_to_item(r) for r in conn.execute(
+            "SELECT * FROM items WHERE queued=1 AND kind!='task' AND source_type!='tg_private'").fetchall()]
+        EXPORT_PATH.write_text(render_export(view, queued), "utf-8")
+        try:
+            stats["alerts"] = notify.check(conn, cfg, view, date.today())
+        except (OSError, subprocess.SubprocessError):
+            stats["alerts"] = 0  # уведомление не стоит сорванного сбора
+    return stats
+
+
+def run_collection(force=True, full=False):
+    """Один проход. Возвращает статистику или None, если проход идёт или делать нечего."""
     if not _running.acquire(blocking=False):
         return None
     try:
-        set_stage("Обновляю новости и чаты")
         cfg = load_config()
         started = datetime.now().astimezone()
-        stats = {}
+        moment = started.isoformat(timespec="seconds")
         with db.connect() as conn:
-            move_channels_to_news(conn)
-            stats["obsidian"] = obsidian.collect(conn, cfg)
-            conn.commit()
-            stats["news"] = feeds.collect(conn, cfg)
-            stats["telegram"] = telegram.collect(conn, cfg)
-            mark_bots(conn)
-            conn.commit()
-            stats["analyzed"] = analysis.run(conn, cfg)
-            summary = {"at": started.isoformat(timespec="seconds"), **stats,
-                       "seconds": round((datetime.now().astimezone() - started).total_seconds(), 1)}
+            marks = db.kv_get(conn, "run_marks", {})
+            todo = plan(marks, cfg, started, force, full)
+            if not any(todo.values()):
+                return None
+            summary = {"at": moment, **collect_data(conn, cfg, todo)}
+            summary["seconds"] = round((datetime.now().astimezone() - started).total_seconds(), 1)
+            marks.update({key: moment for key in ("full", "chats", "news", "model") if todo[key]})
+            if "analyzed" in summary:
+                marks["data"] = moment
+            db.kv_set(conn, "run_marks", marks)
             db.kv_set(conn, "last_run", summary)
-            view = analysis.today_view(conn, cfg)
-            queued = [db.row_to_item(r) for r in conn.execute(
-                "SELECT * FROM items WHERE queued=1 AND kind!='task' AND source_type!='tg_private'").fetchall()]
-            EXPORT_PATH.write_text(render_export(view, queued), "utf-8")
-            set_stage("Модель разбирает чаты", data_ready=True)
-            summary.update(run_local_model(conn, cfg))
-            db.kv_set(conn, "last_run", summary)
+            conn.commit()
+            if todo["model"]:
+                set_stage("Модель разбирает чаты", data_ready=True)
+                summary.update(run_local_model(conn, cfg))
+                db.kv_set(conn, "last_run", summary)
+                marks["data"] = datetime.now().astimezone().isoformat(timespec="seconds")
+                db.kv_set(conn, "run_marks", marks)
         return summary
     finally:
         _running.release()
-
-
-def chat_state(conn, cfg):
-    since = (datetime.now(timezone.utc) - timedelta(hours=72)).isoformat()
-    return analysis.chat_view(conn, since, date.today(), cfg)
 
 
 def mark_bots(conn):
@@ -94,25 +148,19 @@ def move_channels_to_news(conn):
 
 def run_local_model(conn, cfg):
     """Модель запускается, только когда есть работа: она занимает около 4 ГБ памяти."""
-    outdated = lambda state: bool(state["live"]) and state["overview"] is None
-    if not (deadlines.has_work(conn, cfg) or local_ai.chats_to_digest(conn, muted_chats(cfg)) or replies.pending(conn)
-            or outdated(chat_state(conn, cfg))):
-        return {"deadlines": 0, "digests": 0}
+    if not (deadlines.has_work(conn, cfg) or promises.has_work(conn, cfg)
+            or local_ai.chats_to_digest(conn, muted_chats(cfg)) or replies.pending(conn)):
+        return {"deadlines": 0, "promises": 0, "digests": 0}
     with local_ai.running_model(cfg) as (model_cfg, model):
         added = deadlines.process(conn, cfg, model_cfg, model)
+        promised = promises.process(conn, cfg, model_cfg, model)
         conn.commit()
         if model:
             replies.refresh(conn, model_cfg, model)
         digests = local_ai.refresh_digests(conn, model_cfg, model) if model else 0
-        state = chat_state(conn, cfg)
-        if model and outdated(state):
-            try:
-                local_ai.refresh_overview(conn, model_cfg, model, state["live"], analysis.live_key(state["live"]))
-            except (OSError, ValueError, KeyError, IndexError):
-                pass  # сводка подождёт следующего сбора, разборы чатов уже сохранены
-    if added:
+    if added or promised:
         refresh_tasks(conn, cfg)
-    return {"deadlines": added, "digests": digests}
+    return {"deadlines": added, "promises": promised, "digests": digests}
 
 
 def refresh_tasks(conn, cfg):

@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pulse import agenda, analysis, assistant, claude_ai, db, deadlines, digest, feeds, local_ai, mcp_server, obsidian, pipeline, remote, replies, summaries, telegram
+from pulse import agenda, analysis, assistant, autostart, claude_ai, db, deadlines, digest, feeds, learning, local_ai, mcp_server, notify, obsidian, pipeline, promises, remote, replies, summaries, telegram
 from pulse.config import DEFAULT_CONFIG, active_mode
 from pulse.text import extract_due, keyword_regex, stem
 
@@ -95,7 +95,7 @@ class Scoring(unittest.TestCase):
     def ctx(self):
         cfg = {"topics": [{"id": "n", "name": "Нейро", "weight": 1.4, "keywords": ["мозг"], "exclude": []}]}
         return {"now": datetime.now(timezone.utc), "topics": feeds.compile_topics(cfg), "notes": [], "boost": {}, "levels": {},
-                "activity": {}, "model": ({}, {}), "blacklist": [keyword_regex("промокод")],
+                "activity": {}, "model": ({}, {}, {}), "blacklist": [keyword_regex("промокод")],
                 "me": [keyword_regex("Максим")], "urgent": []}
 
     def item(self, title, **meta):
@@ -751,7 +751,7 @@ class Modes(unittest.TestCase):
     def ctx(self, **extra):
         cfg = {"topics": [{"id": "n", "name": "Нейро", "weight": 1.0, "keywords": ["мозг"], "exclude": []}]}
         base = {"now": datetime.now(timezone.utc), "topics": feeds.compile_topics(cfg), "notes": [], "boost": {}, "levels": {},
-                "activity": {}, "model": ({}, {}), "blacklist": [], "me": [], "urgent": []}
+                "activity": {}, "model": ({}, {}, {}), "blacklist": [], "me": [], "urgent": []}
         return {**base, **extra}
 
     def item(self, kind="news", name="x", **meta):
@@ -1209,11 +1209,7 @@ class Assistant(unittest.TestCase):
         cfg = {"tg_private": [], "modes": DEFAULT_CONFIG["modes"], "active_mode": "all"}
         self.assertEqual(assistant.chats_answer(self.conn, cfg)["answer"], "В чатах сейчас нет незакрытых дел.")
         self.conn.execute("INSERT INTO chat_digests VALUES ('Поток','Обсуждают эссе','Сдать эссе','tg-1-1','y')")
-        live = assistant.chats_state(self.conn, cfg)["live"]
-        db.kv_set(self.conn, "chat_overview", {"headline": "Главное в чатах", "points": ["Пункт"], "key": analysis.live_key(live)})
-        answer = assistant.chats_answer(self.conn, cfg)["answer"]
-        self.assertNotIn("Главное в чатах", answer)  # сводка повторяла бы те же дела
-        self.assertIn("Поток: Сдать эссе", answer)
+        self.assertIn("Поток: Сдать эссе", assistant.chats_answer(self.conn, cfg)["answer"])
         db.kv_set(self.conn, "tg_my_last", {"None": 5})
 
     def test_most_important_task_is_answered_from_the_list(self):
@@ -1328,26 +1324,15 @@ class Freshness(unittest.TestCase):
         cfg = {"tg_private": [], "modes": DEFAULT_CONFIG["modes"], "active_mode": "all"}
         return analysis.chat_view(conn, (datetime.now(timezone.utc) - timedelta(days=3)).isoformat(), date.today(), cfg)
 
-    def test_my_reply_clears_digest_action_and_overview(self):
+    def test_my_reply_clears_digest_action(self):
         conn = self.conn()
         self.add(conn, 10, "Деньги переслала, проверь и ответь")
         self.digest(conn, "tg-7-10")
-        live = self.view(conn)["live"]
-        self.assertEqual([c["action"] for c in live], ["Проверить перевод"])
-        db.kv_set(conn, "chat_overview", {"headline": "Срочно проверить деньги от Раисы", "points": [], "key": analysis.live_key(live)})
-        self.assertIsNotNone(self.view(conn)["overview"])
+        self.assertEqual([c["action"] for c in self.view(conn)["live"]], ["Проверить перевод"])
         db.kv_set(conn, "tg_my_last", {"7": 11})  # вы ответили
         view = self.view(conn)
         self.assertEqual(view["live"], [])
-        self.assertIsNone(view["overview"])
         self.assertEqual([c for c in view["signals"] if c["reply"]], [])
-
-    def test_changed_list_hides_old_overview(self):
-        conn = self.conn()
-        self.add(conn, 10, "Посмотри?")
-        self.digest(conn, "tg-7-10")
-        db.kv_set(conn, "chat_overview", {"headline": "Старая", "points": [], "key": "другой"})
-        self.assertIsNone(self.view(conn)["overview"])
 
     def test_old_group_notice_is_not_waiting(self):
         item = {"uid": "tg-7-1", "body": "Подключитесь, пожалуйста?", "title": "т", "published": (datetime.now(timezone.utc) - timedelta(hours=40)).isoformat(),
@@ -1436,7 +1421,7 @@ class AnsweredBefore(unittest.TestCase):
         db.kv_set(conn, "tg_my_last", {"5": 0})
         seen = {}
 
-        async def collect_async(client, chats, cursors, asked):
+        async def collect_async(client, chats, cursors, asked, full=False):
             seen["asked"] = set(asked)
             return [(chats[0], [], 100, 77, None)]
 
@@ -1475,14 +1460,11 @@ class AnsweredBefore(unittest.TestCase):
         self.assertEqual(json.loads(conn.execute("SELECT meta FROM items").fetchone()["meta"])["chat_kind"], "бот")
 
 
-class ChatOverview(unittest.TestCase):
-    def test_parse(self):
-        result = local_ai.parse_overview("ГЛАВНОЕ: Вера ждёт раздел заявки\nДАЛЬШЕ:\n- Посмотреть афишу\n- Эссе до пятницы")
-        self.assertEqual(result, {"headline": "Вера ждёт раздел заявки", "points": ["Посмотреть афишу", "Эссе до пятницы"]})
-
-    def test_overview_never_reaches_claude_export(self):
+class ChatPrivacy(unittest.TestCase):
+    def test_queue_never_reaches_claude_export(self):
+        secret = {"name": "СЕКРЕТ", "preview": "СЕКРЕТ", "action": "СЕКРЕТ"}
         view = {"actions": [], "agenda": [], "main": [], "rest": [], "stats": {}, "tiles": {"reply": 0, "chat_due": 0},
-                "chats": {"overview": {"headline": "СЕКРЕТ"}}}
+                "queue": [{"chat": secret}], "fresh": [], "chats": {"signals": [secret]}}
         self.assertNotIn("СЕКРЕТ", pipeline.render_export(view, []))
         self.assertNotIn("СЕКРЕТ", json.dumps(mcp_server.public_today(view), ensure_ascii=False))
 
@@ -1496,6 +1478,347 @@ class ChatOverview(unittest.TestCase):
         pipeline.move_channels_to_news(conn)
         kinds = {r["uid"]: (r["kind"], r["source_type"]) for r in conn.execute("SELECT uid, kind, source_type FROM items")}
         self.assertEqual(kinds, {"a": ("post", "tg_public"), "b": ("message", "tg_private"), "c": ("message", "tg_private")})
+
+
+def memory_db():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db.SCHEMA)
+    return conn
+
+
+class Schedule(unittest.TestCase):
+    CFG = {"chat_interval_min": 5, "news_interval_min": 30, "model_interval_min": 30, "full_collect_hour": 5}
+    NOW = datetime(2026, 11, 3, 12, 0).astimezone()
+
+    def marks(self, **minutes):
+        return {k: (self.NOW - timedelta(minutes=v)).isoformat() for k, v in minutes.items()}
+
+    def test_first_run_is_full(self):
+        self.assertTrue(pipeline.plan({}, self.CFG, self.NOW)["full"])
+
+    def test_nothing_due_means_no_work(self):
+        todo = pipeline.plan(self.marks(full=60, chats=2, news=2, model=2), self.CFG, self.NOW)
+        self.assertFalse(any(todo.values()))
+
+    def test_chats_are_due_earlier_than_news(self):
+        todo = pipeline.plan(self.marks(full=60, chats=6, news=10, model=10), self.CFG, self.NOW)
+        self.assertEqual(todo, {"full": False, "chats": True, "news": False, "model": False})
+
+    def test_button_refreshes_everything_except_full(self):
+        todo = pipeline.plan(self.marks(full=60, chats=1, news=1, model=1), self.CFG, self.NOW, force=True)
+        self.assertEqual(todo, {"full": False, "chats": True, "news": True, "model": True})
+
+    def test_full_runs_once_a_day_after_the_hour(self):
+        yesterday = datetime(2026, 11, 2, 23, 0).astimezone().isoformat()
+        self.assertTrue(pipeline.full_is_due(yesterday, 5, datetime(2026, 11, 3, 5, 1).astimezone()))
+        self.assertFalse(pipeline.full_is_due(yesterday, 5, datetime(2026, 11, 3, 4, 59).astimezone()))
+        today = datetime(2026, 11, 3, 5, 1).astimezone().isoformat()
+        self.assertFalse(pipeline.full_is_due(today, 5, datetime(2026, 11, 3, 23, 0).astimezone()))
+
+    def test_computer_off_for_days_does_not_wait_for_the_hour(self):
+        old = datetime(2026, 10, 30, 12, 0).astimezone().isoformat()
+        self.assertTrue(pipeline.full_is_due(old, 5, datetime(2026, 11, 3, 2, 0).astimezone()))
+
+
+class QuickCollect(unittest.TestCase):
+    def client(self, tops):
+        class Client:
+            fetched = []
+
+            async def connect(self):
+                pass
+
+            async def disconnect(self):
+                pass
+
+            async def is_user_authorized(self):
+                return True
+
+            def iter_dialogs(self, limit):
+                async def run():
+                    for chat_id, top in tops.items():
+                        yield SimpleNamespace(id=chat_id, message=SimpleNamespace(id=top))
+                return run()
+
+            async def get_entity(self, chat_id):
+                Client.fetched.append(chat_id)
+                return SimpleNamespace(username=None)
+
+            def iter_messages(self, entity, **kwargs):
+                async def run():
+                    return
+                    yield
+                return run()
+        return Client()
+
+    def test_chats_without_news_are_not_touched(self):
+        client = self.client({1: 100, 2: 205})
+        chats = [{"id": 1, "name": "А", "kind": "личный"}, {"id": 2, "name": "Б", "kind": "личный"}]
+        results = asyncio.run(telegram.collect_async(client, chats, {"1": 100, "2": 200}, {"1", "2"}))
+        self.assertEqual(client.fetched, [2])
+        self.assertEqual(len(results), 1)
+
+    def test_new_chat_is_read_even_without_news(self):
+        client = self.client({})
+        asyncio.run(telegram.collect_async(client, [{"id": 3, "name": "В", "kind": "группа"}], {}, set()))
+        self.assertEqual(client.fetched, [3])
+
+    def test_full_reads_every_chat_from_the_window_start(self):
+        client = self.client({1: 100})
+        with patch.object(telegram, "TG_DIALOGS_PATH", SimpleNamespace(write_text=lambda *a: None)), \
+                patch.object(telegram, "chat_kind", lambda d: "личный"):
+            client.iter_dialogs = lambda limit: self._dialogs()
+            asyncio.run(telegram.collect_async(client, [{"id": 1, "name": "А", "kind": "личный"}], {"1": 100}, {"1"}, full=True))
+        self.assertEqual(client.fetched, [1])
+
+    async def _dialogs(self):
+        yield SimpleNamespace(id=1, name="А", message=SimpleNamespace(id=100), unread_count=0, date=None, archived=False)
+
+    def test_quiet_chat_gets_a_cursor(self):
+        old = datetime.now(timezone.utc) - timedelta(days=30)
+
+        class Client:
+            async def get_entity(self, chat_id):
+                return SimpleNamespace(username=None)
+
+            def iter_messages(self, entity, **kwargs):
+                async def run():
+                    yield SimpleNamespace(id=50, date=old, out=False, message="старое")
+                return run()
+        items, newest, _ = asyncio.run(telegram.fetch_chat(Client(), {"id": 1, "name": "А", "kind": "группа"}, None))
+        self.assertEqual((items, newest), ([], 50))
+
+    def test_my_promise_is_kept_as_private_outgoing(self):
+        now = datetime.now(timezone.utc)
+
+        class Client:
+            async def get_entity(self, chat_id):
+                return SimpleNamespace(username=None)
+
+            def iter_messages(self, entity, **kwargs):
+                async def run():
+                    yield SimpleNamespace(id=60, date=now, out=True, message="Скину отчёт завтра")
+                    yield SimpleNamespace(id=59, date=now, out=True, message="Ок")
+                return run()
+        items, _, my_last = asyncio.run(telegram.fetch_chat(Client(), {"id": 1, "name": "Вера", "kind": "личный"}, 1))
+        self.assertEqual([(i["kind"], i["source_type"]) for i in items], [("outgoing", "tg_private")])
+        self.assertEqual(my_last, 60)
+
+
+class Promises(unittest.TestCase):
+    def test_clear_promises(self):
+        for text in ("Скину презентацию завтра утром", "Хорошо, посмотрю к пятнице", "Оплачу сегодня вечером", "напишу до среды"):
+            self.assertTrue(promises.is_promise(text), text)
+
+    def test_not_promises(self):
+        for text in ("Скинешь завтра?", "Не скину сегодня, прости", "Если успею, сделаю завтра", "Может, посмотрю вечером",
+                     "Завтра на пары", "Сделаю", "Посмотрел вчера", "Когда сделаю завтра, скажу"):
+            self.assertFalse(promises.is_promise(text), text)
+
+    def test_due_from_words(self):
+        tuesday = date(2026, 11, 3)
+        self.assertEqual(promises.promise_due("Скину завтра", tuesday), date(2026, 11, 4))
+        self.assertEqual(promises.promise_due("Скину вечером", tuesday), tuesday)
+        self.assertEqual(promises.promise_due("Сделаю на неделе", tuesday), date(2026, 11, 8))
+        self.assertEqual(promises.promise_due("Сделаю на выходных", tuesday), date(2026, 11, 7))
+
+    def add(self, conn, body="Скину отчёт завтра", chat="Вера"):
+        db.upsert_item(conn, {"uid": "tg-1-5", "kind": "outgoing", "source_type": "tg_private", "source_name": chat, "title": body, "body": body,
+                              "published": db.now_iso(), "meta": {"chat_id": 1, "chat_kind": "личный"}})
+
+    def test_written_once_into_chat_section_without_model(self):
+        conn = memory_db()
+        self.add(conn)
+        with TemporaryDirectory() as folder:
+            note = Path(folder) / "Актуальное.md"
+            note.write_text("Сделать сейчас\n\n### Прочее\n", "utf-8")
+            cfg = {"vault": folder, "obsidian": {"agenda_notes": ["Актуальное.md"]}, "tg_private": [], "deadlines": {"auto_add": True, "max_per_run": 5}}
+            with patch.object(agenda, "backup", lambda path: None):
+                self.assertEqual(promises.process(conn, cfg), 1)
+                self.assertEqual(promises.process(conn, cfg), 0)
+            text = note.read_text("utf-8")
+        self.assertIn(f"### {agenda.CHAT_SECTION}", text)
+        self.assertIn("Обещание: Скину отчёт завтра · Вера", text)
+
+    def test_can_be_switched_off(self):
+        conn = memory_db()
+        self.add(conn)
+        cfg = {"tg_private": [], "deadlines": {"promises": False}}
+        self.assertFalse(promises.has_work(conn, cfg))
+
+    def test_outgoing_never_shows_in_chat_views(self):
+        conn = memory_db()
+        self.add(conn)
+        cfg = {"tg_private": [], "modes": DEFAULT_CONFIG["modes"], "active_mode": "all"}
+        view = analysis.chat_view(conn, (datetime.now(timezone.utc) - timedelta(days=3)).isoformat(), date.today(), cfg)
+        self.assertEqual(view["messages"], 0)
+        self.assertEqual(claude_ai.is_public(db.row_to_item(conn.execute("SELECT * FROM items").fetchone())), False)
+
+
+class Queue(unittest.TestCase):
+    TODAY = date(2026, 11, 3)
+
+    def task(self, title, due, heading=""):
+        return {"title": title, "due": due, "meta": {"heading": heading}}
+
+    def chat(self, name, reply=0, due=None, action=""):
+        return {"name": name, "reply": reply, "due": due, "action": action}
+
+    def test_chat_with_same_deadline_as_task_is_dropped(self):
+        rows = analysis.do_queue([self.task("Дедлайн регистрации · HSE Career", "2026-11-05", agenda.CHAT_SECTION)],
+                                 [self.chat("Чат HSE Career", due="2026-11-05")], self.TODAY)
+        self.assertEqual(len(rows), 1)
+        self.assertIn("task", rows[0])
+
+    def test_waiting_person_stays_next_to_a_task(self):
+        rows = analysis.do_queue([self.task("Эссе · Поток", "2026-11-05", agenda.CHAT_SECTION)], [self.chat("Поток", reply=1)], self.TODAY)
+        self.assertEqual(len(rows), 2)
+
+    def test_my_promise_does_not_hide_a_chat(self):
+        rows = analysis.do_queue([self.task("Обещание: Скинуть файл · Вера", "2026-11-05", agenda.CHAT_SECTION)],
+                                 [self.chat("Вера", action="Посмотреть договор")], self.TODAY)
+        self.assertEqual(len(rows), 2)
+
+    def test_same_task_twice_is_shown_once(self):
+        rows = analysis.do_queue([self.task("Сдать эссе", "2026-11-05"), self.task("сдать эссе", "2026-11-05")], [], self.TODAY)
+        self.assertEqual(len(rows), 1)
+
+    def test_order_overdue_then_soon_then_people(self):
+        rows = analysis.do_queue([self.task("Потом", "2026-11-08"), self.task("Просрочено", "2026-11-01"), self.task("Завтра", "2026-11-04")],
+                                 [self.chat("Вера", reply=1)], self.TODAY)
+        self.assertEqual([r.get("task", {}).get("title") or r["chat"]["name"] for r in rows], ["Просрочено", "Завтра", "Вера", "Потом"])
+
+    def test_fresh_news_skip_what_is_already_shown(self):
+        now = datetime.now(timezone.utc)
+        item = lambda n, hours, cluster: {"id": n, "published": (now - timedelta(hours=hours)).isoformat(), "cluster": cluster}
+        stream = [item(1, 1, 10), item(2, 2, 20), item(3, 2, 20), item(4, 8, 40)]
+        self.assertEqual([i["id"] for i in analysis.fresh_news(stream, {10}, now)], [2])
+
+    def test_links_open_the_message(self):
+        private = {"url": "", "uid": "tg-5-77", "meta": {"chat_id": 5, "chat_kind": "личный"}}
+        group = {"url": "", "uid": "tg--105-9", "meta": {"chat_id": -105, "chat_kind": "группа"}}
+        public = {"url": "https://t.me/c/1/2", "uid": "tg--1001-2", "meta": {"chat_id": -1001, "chat_kind": "группа"}}
+        self.assertEqual(analysis.message_link(private), "tg://openmessage?user_id=5&message_id=77")
+        self.assertEqual(analysis.message_link(group), "tg://openmessage?chat_id=105&message_id=9")
+        self.assertEqual(analysis.message_link(public), "https://t.me/c/1/2")
+
+
+class Learning(unittest.TestCase):
+    def add_news(self, conn, uid, feedback, topics=("ai",), source="Коммерсантъ"):
+        db.upsert_item(conn, {"uid": uid, "kind": "news", "source_type": "rss", "source_name": source, "title": f"Заголовок {uid}", "published": db.now_iso()})
+        conn.execute("UPDATE items SET feedback=?, topics=? WHERE uid=?", (feedback, json.dumps(list(topics)), uid))
+
+    def test_topic_marks_lower_similar_news(self):
+        conn = memory_db()
+        for n in range(3):
+            self.add_news(conn, f"u{n}", -1)
+        model = analysis.feedback_model(conn)
+        self.assertLess(analysis.feedback_score(set(), "Другой", model, ["ai"]), 0)
+        self.assertEqual(analysis.feedback_score(set(), "Другой", model, ["neuro"]), 0)
+
+    def test_chat_gets_quiet_after_three_marks_and_only_once(self):
+        conn = memory_db()
+        cfg = {"tg_private": [{"id": 1, "name": "Шум"}]}
+        with patch.object(learning, "save_config", lambda c: None):
+            self.assertFalse(learning.note_ignored(conn, cfg, "Шум"))
+            self.assertFalse(learning.note_ignored(conn, cfg, "Шум"))
+            self.assertTrue(learning.note_ignored(conn, cfg, "Шум"))
+            self.assertEqual(cfg["tg_private"][0]["level"], "тише")
+            self.assertFalse(learning.note_ignored(conn, cfg, "Шум"))
+
+    def test_chat_set_by_hand_is_not_changed(self):
+        conn = memory_db()
+        db.kv_set(conn, "learned_chats", {"Важный": 2})
+        cfg = {"tg_private": [{"id": 1, "name": "Важный", "level": "всегда"}]}
+        self.assertFalse(learning.note_ignored(conn, cfg, "Важный"))
+        self.assertEqual(cfg["tg_private"][0]["level"], "всегда")
+
+    def test_view_and_forget(self):
+        conn = memory_db()
+        self.add_news(conn, "a", -1)
+        db.kv_set(conn, "learned_chats", {"Шум": 3})
+        cfg = {"tg_private": [{"id": 1, "name": "Шум", "level": "тише"}], "topics": [{"id": "ai", "name": "ИИ"}]}
+        seen = learning.view(conn, cfg)
+        self.assertEqual(seen["topics"], [{"name": "ИИ", "score": -1}])
+        self.assertTrue(seen["chats"][0]["quiet"])
+        with patch.object(learning, "load_config", lambda: cfg), patch.object(learning, "save_config", lambda c: None):
+            learning.forget(conn)
+        self.assertEqual(cfg["tg_private"][0]["level"], "обычно")
+        self.assertEqual(learning.view(conn, cfg)["marks"], 0)
+
+
+class Notifications(unittest.TestCase):
+    TODAY = date(2026, 11, 3)
+    NOW = datetime(2026, 11, 3, 12, 0, tzinfo=timezone.utc)
+
+    def view(self, hours=30, kind="личный", level="обычно"):
+        since = (self.NOW - timedelta(hours=hours)).isoformat()
+        return {"actions": [{"uid": "t1", "title": "Сдать эссе", "due": "2026-11-04"}, {"uid": "t2", "title": "Потом", "due": "2026-11-09"}],
+                "chats": {"signals": [{"name": "Вера", "reply": 1, "kind": kind, "level": level, "waiting_since": since}]}}
+
+    def test_tomorrow_and_long_wait(self):
+        self.assertEqual([a[1:] for a in notify.alerts(self.view(), self.TODAY, self.NOW)],
+                         [("Срок завтра", "Сдать эссе"), ("Ждут ответа больше суток", "Вера")])
+
+    def test_short_wait_is_silent(self):
+        self.assertEqual(len(notify.alerts(self.view(hours=5), self.TODAY, self.NOW)), 1)
+
+    def test_group_only_if_marked_important(self):
+        self.assertEqual(len(notify.alerts(self.view(kind="группа"), self.TODAY, self.NOW)), 1)
+        self.assertEqual(len(notify.alerts(self.view(kind="группа", level="всегда"), self.TODAY, self.NOW)), 2)
+
+    def test_quiet_hours_cross_midnight(self):
+        options = {"quiet_from": 23, "quiet_to": 9}
+        self.assertTrue(notify.is_quiet(23, options))
+        self.assertTrue(notify.is_quiet(3, options))
+        self.assertFalse(notify.is_quiet(12, options))
+
+    def test_each_alert_is_shown_once(self):
+        conn = memory_db()
+        shown = []
+        with patch.object(notify, "show", lambda *a: shown.append(a)), patch.object(notify, "is_quiet", lambda *a: False):
+            notify.check(conn, {"notify": {"enabled": True}}, self.view(hours=500), self.TODAY)
+            notify.check(conn, {"notify": {"enabled": True}}, self.view(hours=500), self.TODAY)
+        self.assertEqual(len(shown), 2)
+
+    def test_switched_off(self):
+        with patch.object(notify, "show", lambda *a: self.fail("показано")):
+            self.assertEqual(notify.check(memory_db(), {"notify": {"enabled": False}}, self.view(), self.TODAY), 0)
+
+    def test_message_text_cannot_break_the_toast(self):
+        self.assertNotIn("<script", notify.toast_xml("<script>", "a & b"))
+
+
+class Autostart(unittest.TestCase):
+    def test_file_appears_and_disappears(self):
+        with TemporaryDirectory() as folder:
+            target = Path(folder) / "Startup" / "Pulse.vbs"
+            with patch.object(autostart, "STARTUP", target):
+                self.assertTrue(autostart.set_enabled(True))
+                self.assertIn("pulse serve", target.read_text("utf-16"))
+                self.assertFalse(autostart.set_enabled(False))
+
+
+class WeekReview(unittest.TestCase):
+    def test_done_log_starts_from_now(self):
+        conn = memory_db()
+        with patch.object(pipeline, "done_tasks", lambda cfg, limit: [{"title": "Старое"}]):
+            pipeline.note_done(conn, {})
+        with patch.object(pipeline, "done_tasks", lambda cfg, limit: [{"title": "Старое"}, {"title": "Новое"}]):
+            pipeline.note_done(conn, {})
+        cfg = {**DEFAULT_CONFIG, "tg_private": []}
+        week = analysis.week_view(conn, cfg)
+        self.assertEqual(week["done"], ["Новое"])
+
+    def test_overdue_and_waiting_columns(self):
+        conn = memory_db()
+        past = (date.today() - timedelta(days=2)).isoformat()
+        db.upsert_item(conn, {"uid": "t1", "kind": "task", "source_type": "obsidian", "source_name": "Актуальное", "title": "Забытое", "published": db.now_iso(),
+                              "due": past, "meta": {"agenda": True, "status": "w"}})
+        conn.execute("UPDATE items SET tier='high'")
+        week = analysis.week_view(conn, {**DEFAULT_CONFIG, "tg_private": []})
+        self.assertEqual((week["overdue_total"], week["waiting_for"]), (1, 1))
 
 
 class ArticleSummaries(unittest.TestCase):

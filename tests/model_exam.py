@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pulse import assistant, deadlines, local_ai, summaries
+from pulse import assistant, deadlines, local_ai, promises, summaries
 from pulse.config import DATA, load_config
 
 REPORT = DATA / "model_exam.txt"
@@ -42,6 +42,20 @@ SHOULD_SKIP = [
     "Тест на беременность Кате в пятницу расскажем, шучу",
     "Кто идёт в бар в пятницу?",
     "До среды отвечаю только в почте, телефон в ремонте",
+]
+PROMISES_YES = [
+    "Скину презентацию завтра утром",
+    "Хорошо, посмотрю твой текст к пятнице",
+    "Договорились, оплачу взнос сегодня вечером",
+    "Напишу куратору до среды и расскажу, что он ответил",
+    "Подготовлю раздел к понедельнику",
+]
+PROMISES_NO = [
+    "Завтра посмотрю новый сериал",
+    "Вечером сделаю себе пасту",
+    "Сегодня проверю, закрыт ли магазин, мне самому интересно",
+    "В пятницу гляну матч",
+    "Утром напишу в дневник",
 ]
 ARTICLE_TITLE = "Сон после обучения улучшает память, но не у всех"
 ARTICLE = """Исследователи из трёх университетов проверили, как дневной сон влияет на запоминание слов.
@@ -77,6 +91,13 @@ def main():
         total = len(SHOULD_ADD) + len(SHOULD_SKIP)
         say(f"\nнайдено {hits} из {len(SHOULD_ADD)} | ложных {len(false_alarms)} из {len(SHOULD_SKIP)} | "
             f"в среднем {(time.monotonic() - started) / total:.1f} с на сообщение")
+        say("\nобещания:")
+        right = 0
+        for text, expected in [(t, True) for t in PROMISES_YES] + [(t, False) for t in PROMISES_NO]:
+            task = promises.decide_with_model(model_cfg, model, {"body": text, "source_name": "Вера"})
+            right += bool(task) == expected
+            say(f"{'верно ' if bool(task) == expected else 'ОШИБКА'} | правила: {'да ' if promises.is_promise(text) else 'нет'} | {text[:48]} -> {task}")
+        say(f"верно {right} из {len(PROMISES_YES) + len(PROMISES_NO)}")
         chat = [{"author": "Анна", "body": "Семинар в среду перенесли на 12:00"},
                 {"author": "Олег", "body": "А эссе тогда до какого числа?"},
                 {"author": "Анна", "body": "Эссе сдаём до 6 ноября, объём 5 страниц"}]

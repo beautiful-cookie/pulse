@@ -4,7 +4,6 @@
 Правила перенесены из методики новостей: только дельта, первоисточник важнее
 агрегатора, сцепка с заметками, чёрный список.
 """
-import hashlib
 import json
 import math
 import re
@@ -14,9 +13,13 @@ from datetime import date, datetime, timedelta, timezone
 from . import agenda, db, replies
 from .config import DEFAULT_LEVEL, LEVELS, active_mode, chat_levels
 from .feeds import compile_topics, is_on_topic, topic_hits
+from .promises import PREFIX
 from .text import extract_due, keyword_regex, stems
 
 ANALYSIS_DAYS = 21
+FRESH_HOURS = 6
+FRESH_SHOWN = 3
+WEEK_SHOWN = 6
 ACTION_HOURS = 24
 GROUP_REPLY_HOURS = 24
 PERSONAL_REPLY_HOURS = 72
@@ -62,23 +65,26 @@ def recent_activity(conn, topics, days=14):
 
 
 def feedback_model(conn):
-    """Оценки «важно» и «не важно» превращаются в веса слов и источников."""
-    words, sources = defaultdict(float), defaultdict(float)
-    rows = conn.execute("SELECT title, source_name, feedback FROM items WHERE feedback!=0").fetchall()
+    """Оценки «важно» и «не важно» превращаются в веса слов, источников и тем."""
+    words, sources, topics = defaultdict(float), defaultdict(float), defaultdict(float)
+    rows = conn.execute("SELECT title, source_name, feedback, topics FROM items WHERE feedback!=0").fetchall()
     for row in rows:
         sources[row["source_name"]] += row["feedback"]
         for word in set(stems(row["title"])):
             words[word] += row["feedback"]
-    return words, sources
+        for topic in json.loads(row["topics"] or "[]"):
+            topics[topic] += row["feedback"]
+    return words, sources, topics
 
 
-def feedback_score(item_words, source, model):
-    words, sources = model
+def feedback_score(item_words, source, model, item_topics=()):
+    words, sources, topics = model
     if not words and not sources:
         return 0.0
     word_part = sum(max(-3, min(3, words.get(w, 0))) for w in item_words) * 1.5
     source_part = max(-3, min(3, sources.get(source, 0))) * 3
-    return max(-20.0, min(20.0, word_part + source_part))
+    topic_part = max(-3, min(3, sum(topics.get(t, 0) for t in item_topics))) * 2
+    return max(-20.0, min(20.0, word_part + source_part + topic_part))
 
 
 def assign_clusters(items):
@@ -182,7 +188,7 @@ def score_item(item, ctx):
         age_hours = max(0.0, (ctx["now"] - _day(item)).total_seconds() / 3600)
         score *= 0.5 ** (age_hours / HALF_LIFE_HOURS)
 
-    learned = feedback_score(set(stems(item["title"])), item["source_name"], ctx["model"])
+    learned = feedback_score(set(stems(item["title"])), item["source_name"], ctx["model"], topics)
     if abs(learned) >= 3:
         score += learned
         reasons.append("вы отмечали похожее как важное" if learned > 0 else "вы отмечали похожее как неважное")
@@ -351,8 +357,15 @@ def live_action(chat, digest, answered, now):
     return digest["action"]
 
 
-def live_key(live):
-    return hashlib.sha1("\n".join(sorted(f"{c['chat']}|{c['action']}" for c in live)).encode("utf-8")).hexdigest()[:16]
+def message_link(item):
+    """Ссылка на сообщение. У личных чатов и обычных групп нет адреса в интернете."""
+    if item["url"]:
+        return item["url"]
+    chat_id = item["meta"].get("chat_id")
+    message_id = item["uid"].rsplit("-", 1)[1]
+    if item["meta"].get("chat_kind") in ("личный", "бот"):
+        return f"tg://openmessage?user_id={chat_id}&message_id={message_id}"
+    return f"tg://openmessage?chat_id={str(chat_id).lstrip('-')}&message_id={message_id}"
 
 
 def dismiss_chat(conn, name):
@@ -388,17 +401,18 @@ def chat_view(conn, since, today, cfg):
         chat = chats.setdefault(item["source_name"], {
             "name": item["source_name"], "kind": item["meta"].get("chat_kind", "группа"), "count": 0, "reply": 0, "last": item["published"],
             "due": None, "preview": None, "author": None, "url": item["url"], "id": item["id"], "ids": [], "level": level,
-            "chat_id": item["meta"].get("chat_id"),
+            "chat_id": item["meta"].get("chat_id"), "link": "", "waiting_since": None,
         })
         chat["count"] += 1
         wants_reply = needs_reply(item, my_last, checks)
         has_due = level != "тише" and bool(item["due"] and item["due"] >= today.isoformat())
         if wants_reply:
             chat["reply"] += 1
+            chat["waiting_since"] = item["published"]  # сообщения идут от новых к старым
         if has_due and (not chat["due"] or item["due"] < chat["due"]):
             chat["due"] = item["due"]
         if (wants_reply or has_due) and not chat["preview"]:
-            chat.update(preview=item["title"], author=item["author"], url=item["url"], id=item["id"])
+            chat.update(preview=item["title"], author=item["author"], url=item["url"], id=item["id"], link=message_link(item))
         if wants_reply or has_due:
             chat["ids"].append(item["id"])
     for chat in chats.values():
@@ -408,17 +422,54 @@ def chat_view(conn, since, today, cfg):
     for chat in chats.values():
         if chat["level"] == "всегда" and not chat["preview"]:
             newest = next(m for m in messages if m["source_name"] == chat["name"])
-            chat.update(preview=newest["title"], author=newest["author"], url=newest["url"], id=newest["id"])
+            chat.update(preview=newest["title"], author=newest["author"], url=newest["url"], id=newest["id"], link=message_link(newest))
     wanted = lambda c: c["reply"] or c["due"] or (c["level"] != "тише" and c["action"]) or c["level"] == "всегда"
     signals = sorted((c for c in chats.values() if wanted(c)),
                      key=lambda c: (c["level"] != "всегда", -c["reply"], c["due"] or "9999", c["name"]))
     quiet = [c for c in chats.values() if c not in signals]
     quiet.sort(key=lambda c: -c["count"])
     live = [{"chat": c["name"], "summary": c["summary"], "action": c["action"]} for c in signals if c["action"]]
-    overview = db.kv_get(conn, "chat_overview")
-    if not live or not overview or overview.get("key") != live_key(live):
-        overview = None  # вы ответили или дело устарело: старой сводке верить нельзя
-    return {"signals": signals, "quiet": quiet, "messages": len(messages), "overview": overview, "live": live}
+    return {"signals": signals, "quiet": quiet, "messages": len(messages), "live": live}
+
+
+def is_promise_task(task):
+    return task["title"].startswith(PREFIX)
+
+
+def do_queue(actions, signals, today):
+    """Одна очередь «Сделать»: дела и чаты, каждое дело один раз."""
+    def rank(due):
+        days = (date.fromisoformat(due) - today).days
+        return 0 if days < 0 else 1 if days <= 1 else 3 if days <= 7 else 4
+
+    from_chats = [t for t in actions if t["meta"].get("heading") == agenda.CHAT_SECTION and not is_promise_task(t)]
+
+    def repeats_task(chat):
+        same_chat = any(chat["name"] in t["title"] for t in from_chats)
+        return same_chat or any(t["due"] == chat["due"] for t in from_chats if chat["due"])
+
+    rows, seen = [], set()
+    for task in actions:
+        words = frozenset(stems(task["title"]))
+        if words and words in seen:
+            continue
+        seen.add(words)
+        rows.append({"task": task, "rank": rank(task["due"]), "due": task["due"]})
+    for chat in signals:
+        if chat["reply"] or ((chat["due"] or chat["action"]) and not repeats_task(chat)):
+            rows.append({"chat": chat, "rank": 2 if chat["reply"] else rank(chat["due"]) if chat["due"] else 3, "due": chat["due"]})
+    return sorted(rows, key=lambda r: (r["rank"], r["due"] or "9999"))
+
+
+def fresh_news(stream, shown_clusters, now):
+    """Только что вышедшее: рейтинг меняется медленно, и без этого новое не видно часами."""
+    since = (now - timedelta(hours=FRESH_HOURS)).isoformat()
+    found, seen = [], set(shown_clusters)
+    for item in sorted(stream, key=lambda i: i["published"], reverse=True):
+        if item["published"] >= since and item["cluster"] not in seen:
+            seen.add(item["cluster"])
+            found.append(item)
+    return found[:FRESH_SHOWN]
 
 
 def today_view(conn, cfg):
@@ -467,7 +518,8 @@ def today_view(conn, cfg):
               for t in cfg["topics"]]
 
     return {
-        "topic_names": names, "main": main, "rest": rest, "actions": actions[:10],
+        "topic_names": names, "main": main, "fresh": fresh_news(stream, main_clusters, now),
+        "queue": do_queue(actions, chats["signals"], today), "rest": rest, "actions": actions[:10],
         "actions_total": len(actions), "agenda": agenda[:6], "stale": stale[:30], "stale_total": len(stale),
         "reviews": reviews[:4], "reviews_total": len(reviews), "chats": chats, "failing": failing,
         "topics": [t for t in topics if t["count"]],
@@ -482,7 +534,7 @@ def today_view(conn, cfg):
         },
         "stats": {"sources": total_sources, "ok_sources": total_sources - len(failing),
                   "scanned": counts, "shown": len(main), "inbox": inbox},
-        "last_run": db.kv_get(conn, "last_run"),
+        "last_run": db.kv_get(conn, "last_run"), "marks": db.kv_get(conn, "run_marks", {}),
     }
 
 
@@ -506,6 +558,30 @@ def auto_brief(view):
     else:
         headline = view["main"][0]["title"] if view["main"] else "Новостей по вашим темам нет"
     return {"author": "auto", "headline": headline, "summary": " ".join(parts), "sections": []}
+
+
+def week_view(conn, cfg):
+    """Обзор недели: что сделано, что зависло, кто ждёт ответа и чем вы занимались."""
+    today = date.today()
+    now = datetime.now(timezone.utc)
+    week_ago = (today - timedelta(days=7)).isoformat()
+    done = [title for title, day in db.kv_get(conn, "done_log", {}).items() if day >= week_ago]
+    tasks = [db.row_to_item(r) for r in conn.execute("SELECT * FROM items WHERE kind='task' AND state='new'").fetchall()]
+    overdue = sorted((t for t in tasks if t["due"] and t["due"] < today.isoformat() and t["tier"] != "stale"), key=lambda t: t["due"])
+    status = Counter(t["meta"].get("status", " ") for t in tasks if t["meta"].get("agenda"))
+    chats = chat_view(conn, (now - timedelta(hours=72)).isoformat(), today, cfg)
+    waiting = [c for c in chats["signals"] if c["reply"]]
+    compiled = compile_topics(cfg)
+    activity = recent_activity(conn, compiled, days=7).most_common(3)
+    names = {t["id"]: t["name"] for t in compiled}
+    found = conn.execute("SELECT COUNT(*) c FROM chat_deadlines WHERE status='added' AND created>=?", ((now - timedelta(days=7)).isoformat(),)).fetchone()["c"]
+    return {
+        "done": done[-WEEK_SHOWN:][::-1], "done_total": len(done),
+        "overdue": [{"title": t["title"], "due": t["due"]} for t in overdue[:WEEK_SHOWN]], "overdue_total": len(overdue),
+        "in_work": status.get("/", 0), "waiting_for": status.get("w", 0),
+        "unanswered": [{"name": c["name"], "preview": c["preview"]} for c in waiting[:WEEK_SHOWN]], "unanswered_total": len(waiting),
+        "topics": [{"name": names[t], "notes": n} for t, n in activity if t in names], "from_chats": found,
+    }
 
 
 def analytics_view(conn, cfg):
@@ -546,5 +622,5 @@ def analytics_view(conn, cfg):
         sources.append(dict(row))
     zones = [dict(r) for r in conn.execute(
         "SELECT zone, COUNT(*) n FROM notes WHERE mtime>=? GROUP BY zone ORDER BY n DESC", (since,)).fetchall()]
-    return {"days": days, "topics": rows, "sources": sources, "zones": zones,
+    return {"days": days, "topics": rows, "sources": sources, "zones": zones, "week": week_view(conn, cfg),
             "tracked_since": conn.execute("SELECT MIN(collected) m FROM items WHERE kind!='task'").fetchone()["m"]}

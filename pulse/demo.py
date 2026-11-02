@@ -60,7 +60,7 @@ def build():
     source.close()
     target.execute("DELETE FROM items WHERE kind='message' OR source_type='tg_private'")
     target.execute("DELETE FROM sources WHERE type='tg_private'")
-    target.execute("DELETE FROM kv WHERE k LIKE 'tg_%' OR k='chat_overview'")
+    target.execute("DELETE FROM kv WHERE k LIKE 'tg_%' OR k IN ('chat_overview', 'learned_chats', 'reply_dismissed', 'notified', 'done_log')")
     target.execute("DELETE FROM items WHERE kind='task' AND json_extract(meta, '$.heading')=?", (CHAT_SECTION,))
     target.execute("CREATE TABLE IF NOT EXISTS chat_digests (chat TEXT PRIMARY KEY, summary TEXT NOT NULL, action TEXT NOT NULL DEFAULT '', last_uid TEXT NOT NULL, updated TEXT NOT NULL)")
     target.execute("DELETE FROM chat_digests")
@@ -81,9 +81,15 @@ def build():
                  published.isoformat(timespec="seconds"), now.isoformat(timespec="seconds"), json.dumps(meta, ensure_ascii=False)))
         target.execute("INSERT INTO sources (key, name, type, last_ok, last_count) VALUES (?,?,?,?,?)",
                        (f"tg:{chat_id}", name, "tg_private", now.isoformat(timespec="seconds"), count))
-    overview = {"headline": "Вера ждёт раздел для заявки, а эссе надо сдать до 6 ноября", "chats": 4, "updated": now.isoformat(),
-                "points": ["Лекторию нужен ваш ответ по макету афиши", "В команде хакатона не решили, кто делает презентацию"]}
-    target.execute("INSERT OR REPLACE INTO kv (k, v) VALUES ('chat_overview', ?)", (json.dumps(overview, ensure_ascii=False),))
+    moment = now.astimezone().isoformat(timespec="seconds")  # расписание не должно идти в сеть
+    marks = {"full": moment, "chats": moment, "news": moment, "model": moment, "data": moment}
+    target.execute("INSERT OR REPLACE INTO kv (k, v) VALUES ('run_marks', ?)", (json.dumps(marks),))
+    target.execute("INSERT OR REPLACE INTO kv (k, v) VALUES ('done_log', ?)", (json.dumps({"Сдать реферат": now.date().isoformat(), "Записаться к врачу": now.date().isoformat()}, ensure_ascii=False),))
+    target.execute(
+        """INSERT INTO items (uid, kind, source_type, source_name, title, body, url, author, published, collected, meta)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        ("tg-1003-1001", "outgoing", "tg_private", "Вера Смирнова", "Скину раздел завтра вечером", "Скину раздел завтра вечером", "", "",
+         now.isoformat(timespec="seconds"), now.isoformat(timespec="seconds"), json.dumps({"chat_id": 1003, "chat_kind": "личный"})))
     for chat, (summary, action) in DIGESTS.items():
         target.execute("INSERT INTO chat_digests VALUES (?,?,?,?,?)", (chat, summary, action, "demo", now.isoformat()))
     target.commit()
@@ -98,7 +104,8 @@ def build():
     config["vault"] = str(DEMO / "vault")
     config["tg_private"] = [{"id": c[2], "name": c[0], "kind": c[1], "weight": 1} for c in CHATS]
     config["tg_public"] = []
-    config["collect_interval_min"] = 10_000_000
+    config["chat_interval_min"] = config["news_interval_min"] = config["model_interval_min"] = 10_000_000
+    config["notify"] = {"enabled": False}
     config["local_ai"] = {**config.get("local_ai", {}), "url": f"http://127.0.0.1:{FAKE_MODEL_PORT}/v1", "external": True, "max_chats_per_run": 15}
     config["remote"] = {"enabled": False, "key": ""}
     (DEMO / "config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2), "utf-8")
@@ -119,10 +126,7 @@ def run():
             "with db.connect() as c:\n"
             "    pipeline.refresh_tasks(c, cfg)\n"
             "    analysis.run(c, cfg)\n"
-            "    print(pipeline.run_local_model(c, cfg))\n"
-            "    state = pipeline.chat_state(c, cfg)\n"
-            "    overview = db.kv_get(c, 'chat_overview')\n"
-            "    db.kv_set(c, 'chat_overview', {**overview, 'key': analysis.live_key(state['live'])})\n")
+            "    print(pipeline.run_local_model(c, cfg))\n")
     subprocess.run([sys.executable, "-X", "utf8", "-c", code], env=env, cwd=ROOT, check=True)
     print(f"Демо: http://127.0.0.1:{PORT}")
     subprocess.run([sys.executable, "-X", "utf8", "-m", "pulse", "serve"], env=env, cwd=ROOT)

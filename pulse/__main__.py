@@ -22,6 +22,9 @@ def main():
     elif command == "collect":
         from .pipeline import run_collection
         print(json.dumps(run_collection(), ensure_ascii=False))
+    elif command == "doctor":
+        from .doctor import run
+        run()
     elif command == "telegram-login":
         from .telegram import login
         login()

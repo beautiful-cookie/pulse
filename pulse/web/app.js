@@ -32,12 +32,13 @@ let activeTopic = "";
 let routeToken = 0;
 let openBrief = false;
 let freshShown = false;
+let userRun = false;
 const taskIndex = {};
 const doneIndex = {};
 
 const icon = (name, cls = "") => `<svg class="ico ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const safeUrl = (u) => (/^(https?:|obsidian:)/i.test(u || "") ? u : "");
+const safeUrl = (u) => (/^(https?:|obsidian:|tg:)/i.test(u || "") ? u : "");
 const topicColor = (id) => { const i = topicOrder.indexOf(id); return i >= 0 && i < 8 ? `var(--s${i})` : "var(--line-2)"; };
 
 document.querySelectorAll("[data-icon]").forEach((el) => el.insertAdjacentHTML("afterbegin", icon(el.dataset.icon)));
@@ -105,6 +106,7 @@ function newsRow(item) {
     </div>
     <div class="news-tools">
       ${url ? `<a class="tool" href="${esc(url)}" target="_blank" rel="noreferrer noopener" title="Открыть">${icon("open")}</a>` : ""}
+      <button class="tool" data-act="down" title="Меньше такого" aria-label="Меньше такого">${icon("down")}</button>
       <button class="tool" data-act="seen" title="Прочитано" aria-label="Прочитано">${icon("check")}</button>
     </div>
     <div class="news-more" hidden>
@@ -356,19 +358,6 @@ function chatRow(chat) {
   return `<a class="quiet-row" href="#feed/${encodeURIComponent(chat.name)}"><span>${esc(chat.name)}</span><span>${chat.count}</span></a>`;
 }
 
-function doRows(data) {
-  const rank = (due) => {
-    const diff = dayDiff(due);
-    return diff < 0 ? 0 : diff <= 1 ? 1 : diff <= 7 ? 3 : 4;
-  };
-  const tasks = data.actions.map((task) => ({ task, rank: rank(task.due), due: task.due }));
-  // Срок из чата уже стоит в делах: вторая строка про то же самое не нужна
-  const hasTask = (c) => data.actions.some((t) => isFromChat(t) && t.title.includes(c.name));
-  const chats = data.chats.signals.filter((c) => c.reply || ((c.due || c.action) && !hasTask(c)))
-    .map((chat) => ({ chat, rank: chat.reply ? 2 : chat.due ? rank(chat.due) : 3, due: chat.due }));
-  return [...tasks, ...chats].sort((a, b) => a.rank - b.rank || (a.due || "9999").localeCompare(b.due || "9999"));
-}
-
 function doRow(row, lead) {
   const cls = lead ? "do-row lead" : "do-row";
   if (row.task) {
@@ -383,14 +372,20 @@ function doRow(row, lead) {
   const when = chat.due ? whenLabel(chat.due) : null;
   const title = chat.reply ? `Ответить: ${chat.name}` : chat.name;
   const note = chat.action || chat.preview || chat.summary || "";
+  const link = safeUrl(chat.link);
+  const external = link.startsWith("http") ? 'target="_blank" rel="noreferrer noopener"' : "";
   return `<div class="${cls}">
-    <button class="do-mark" data-chat-done="${esc(chat.name)}" title="Ответ не нужен" aria-label="Ответ не нужен: ${esc(chat.name)}">${icon("check")}</button>
+    <button class="do-mark" data-chat-done="${esc(chat.name)}" title="Уже сделано" aria-label="Уже сделано: ${esc(chat.name)}">${icon("check")}</button>
     <a class="do-text" href="#feed/${encodeURIComponent(chat.name)}"><span class="do-title">${esc(title)}</span><span class="do-note">${esc(note)}</span></a>
-    ${when ? `<span class="when ${when.tone}">${esc(when.text)}</span>` : ""}</div>`;
+    <span class="do-side">
+      <span class="do-tools">
+        ${link ? `<a class="tool" href="${esc(link)}" ${external} title="Открыть сообщение в Telegram" aria-label="Открыть в Telegram">${icon("open")}</a>` : ""}
+        <button class="tool" data-chat-skip="${esc(chat.name)}" title="Не важно: Пульс учтёт это для этого чата" aria-label="Не важно: ${esc(chat.name)}">${icon("down")}</button>
+      </span>${when ? `<span class="when ${when.tone}">${esc(when.text)}</span>` : ""}</span></div>`;
 }
 
 function doColumn(data) {
-  const rows = doRows(data);
+  const rows = data.queue;
   const shown = rows.slice(0, 7).map((row, index) => doRow(row, index === 0)).join("");
   const extra = rows.length > 7 ? `<details class="mini"><summary>Ещё ${rows.length - 7}</summary>${rows.slice(7).map((r) => doRow(r, false)).join("")}</details>` : "";
   return `<section class="col" id="do">
@@ -398,17 +393,6 @@ function doColumn(data) {
     ${shown || '<p class="calm">Срочного нет. Можно заняться своим.</p>'}${extra}
     <form class="quick-add" id="quick-add"><input id="quick-task" placeholder="Добавить дело" aria-label="Новая задача" autocomplete="off"></form>
   </section>`;
-}
-
-function chatsBrief(data) {
-  const { overview, signals } = data.chats;
-  if (!data.telegram.connected) return "";
-  if (overview) {
-    return `<div class="chat-brief"><p>${esc(overview.headline)}</p>
-      ${overview.points.length ? `<ul>${overview.points.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>` : ""}</div>`;
-  }
-  const waiting = signals.filter((c) => c.reply).length;
-  return `<div class="chat-brief"><p>${waiting ? `В чатах ждут ответа: ${waiting}` : "В чатах спокойно"}</p></div>`;
 }
 
 const ASK_HINTS = ["Что важного в чатах?", "Какие сроки на этой неделе?", "Кто ждёт моего ответа?"];
@@ -528,10 +512,12 @@ function setAskReady(model) {
 }
 
 function newsList() {
-  const pool = activeTopic
-    ? [...today.main, ...today.rest.flatMap((g) => g.items)].filter((i) => i.topics.includes(activeTopic))
-    : today.main;
-  return pool.map(newsRow).join("") || '<p class="calm">Сейчас ничего важного.</p>';
+  if (activeTopic) {
+    const pool = [...today.main, ...today.rest.flatMap((g) => g.items)].filter((i) => i.topics.includes(activeTopic));
+    return pool.map(newsRow).join("") || '<p class="calm">Сейчас ничего важного.</p>';
+  }
+  const fresh = today.fresh.length ? `<div class="news-label">Только что</div>${today.fresh.map(newsRow).join("")}<div class="news-label">Главное</div>` : "";
+  return fresh + (today.main.map(newsRow).join("") || '<p class="calm">Сейчас ничего важного.</p>');
 }
 
 function topicPicker() {
@@ -577,6 +563,8 @@ function renderToday(data) {
   topicOrder = Object.keys(data.topic_names);
   const date = new Date().toLocaleDateString("ru-RU", { weekday: "long", day: "numeric", month: "long" });
   const last = data.last_run ? `${ago(data.last_run.at)} назад` : "ещё не обновлялось";
+  const when = (mark) => (mark ? `${ago(mark)} назад` : "ещё нет");
+  const updated = `Чаты: ${when(data.marks.chats)}. Новости: ${when(data.marks.news)}. Полное обновление: ${when(data.marks.full)}`;
 
   view.innerHTML = `
     <header class="top">
@@ -584,14 +572,13 @@ function renderToday(data) {
       <div class="modes" role="group" aria-label="Режим внимания">
         ${data.modes.map((m) => `<button data-mode="${esc(m.id)}" aria-pressed="${m.id === data.active_mode}">${esc(m.name)}</button>`).join("")}
       </div>
-      <div class="top-right"><span id="run-stage">${esc(data.running ? `${data.stage.text}…` : last)}</span>
+      <div class="top-right"><span id="run-stage" title="${esc(updated)}">${esc(data.running ? `${data.stage.text}…` : last)}</span>
         <button class="icon-btn ${data.running ? "spin" : ""}" id="refresh" ${data.running ? "disabled" : ""} title="Обновить" aria-label="Обновить">${icon("refresh")}</button></div>
     </header>
     <div class="home">
       ${doColumn(data)}
       <section class="col" id="news-panel">
         <h2 class="sec">Знать<button class="digest-btn" id="digest-btn" type="button" title="Claude соберёт сводку новостей. Чаты в неё не попадают">${icon("spark")}<span>Сводка от Claude</span></button></h2>
-        ${chatsBrief(data)}
         ${briefBlock(data.brief)}
         <div class="news-head"><span>Новости</span>${topicPicker()}</div>
         <div id="news"></div>
@@ -648,8 +635,24 @@ async function startCollect() {
   const label = document.getElementById("run-stage");
   if (label) label.textContent = "Обновляю новости и чаты…";
   freshShown = false;
+  userRun = true;
   await api("/api/collect", {});
   waitForRun();
+}
+
+const isCalm = () => !document.hidden && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName)
+  && !view.querySelector(".news-more:not([hidden]), details[open]");
+
+function watchUpdates() {
+  // Сбор идёт сам: страница подхватывает новое, если вы ничего не читаете и не вводите
+  setInterval(async () => {
+    if ((location.hash.slice(1) || "today") !== "today" || !today) return;
+    const status = await api("/api/status").catch(() => null);
+    if (!status) return;
+    const label = document.getElementById("run-stage");
+    if (label && !status.running && status.last_run) label.textContent = `${ago(status.last_run.at)} назад`;
+    if (status.marks.data && status.marks.data !== today.marks.data && isCalm()) route();
+  }, 60000);
 }
 
 function waitForRun() {
@@ -665,7 +668,8 @@ function waitForRun() {
       }
       return waitForRun();
     }
-    toast(status.error ? `Не обновилось: ${status.error}` : "Обновлено");
+    if (userRun || status.error) toast(status.error ? `Не обновилось: ${status.error}` : "Обновлено");
+    userRun = false;
     route();
   }, 2500);
 }
@@ -728,6 +732,29 @@ async function loadFeed() {
   if (data.more) document.getElementById("more").onclick = () => { feedState.offset += 40; loadFeed(); };
 }
 
+function weekCard(title, count, rows, empty) {
+  return `<div class="week-card"><div class="week-num">${count}</div><div class="week-title">${esc(title)}</div>
+    ${rows.length ? `<ul>${rows.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : `<p class="note">${esc(empty)}</p>`}</div>`;
+}
+
+function weekBlock(week) {
+  const late = week.overdue.map((t) => `${taskTitle(t)}, ${whenLabel(t.due).text}`);
+  const people = week.unanswered.map((c) => (c.preview ? `${c.name}: ${c.preview}` : c.name));
+  const topics = week.topics.map((t) => `${t.name}: ${t.notes}`);
+  const extras = [week.in_work ? `В работе: ${week.in_work}` : "", week.waiting_for ? `Жду: ${week.waiting_for}` : "",
+    week.from_chats ? `Новых дел из чатов: ${week.from_chats}` : ""].filter(Boolean).join(" · ");
+  return `<section class="panel">
+    <div class="panel-head">${icon("today")}Неделя</div>
+    <div class="week">
+      ${weekCard("Сделано", week.done_total, week.done, "Отметки считаются с момента, как Пульс начал их вести.")}
+      ${weekCard("Зависло", week.overdue_total, late, "Просроченных дел нет.")}
+      ${weekCard("Ждут ответа", week.unanswered_total, people, "Никто не ждёт.")}
+      ${weekCard("Темы заметок", week.topics.length, topics, "На этой неделе заметки не менялись.")}
+    </div>
+    ${extras ? `<p class="note">${esc(extras)}</p>` : ""}
+  </section>`;
+}
+
 function sparkline(row, days) {
   const height = 24, barWidth = 6, gap = 2;
   const max = Math.max(...row.days, 1);
@@ -775,6 +802,7 @@ async function renderAnalytics() {
   view.innerHTML = `
     <header class="top"><h1>Аналитика</h1></header>
     <div class="stack">
+      ${weekBlock(data.week)}
       <section class="panel">
         <div class="panel-head">${icon("chart")}Мир и вы</div>
         <div class="legend"><span><i style="background:var(--series-1)"></i>Новости за 7 дней</span><span><i style="background:var(--series-2)"></i>Ваши заметки за 14 дней</span></div>
@@ -816,6 +844,8 @@ function privacyBody(data) {
       <span>Просить Claude делать саммари, если локальная модель не справилась<small class="soft">Только публичные статьи. Нужен разовый вход: claude_login.bat</small></span></label>
     <label class="switch plain"><input type="checkbox" id="auto-deadlines" ${draft.deadlines.auto_add ? "checked" : ""}>
       <span>Добавлять сроки из чатов в «Актуальное»<small class="soft">Раздел «Сроки из чатов». Его могут прочитать сессии Claude, которые открывают хранилище</small></span></label>
+    <label class="switch plain"><input type="checkbox" id="auto-promises" ${draft.deadlines.promises !== false ? "checked" : ""}>
+      <span>Находить мои обещания в чатах<small class="soft">«Скину завтра» и подобное попадает в дела. Раздел тот же</small></span></label>
     <label class="switch"><input type="checkbox" id="claude-chats" ${draft.privacy.claude_reads_chats ? "checked" : ""}>
       <span>Разрешить Claude читать отмеченные чаты<small>Текст будет уходить на серверы Anthropic</small></span></label>`;
 }
@@ -845,6 +875,36 @@ function modesBody() {
         <input type="range" min="0" max="2" step="0.1" data-mode-topic="${esc(t.id)}" data-index="${i}" value="${m.topics[t.id] ?? 1}">
         <output>${m.topics[t.id] ?? 1}</output></label>`).join("")}
     </details>`).join("");
+}
+
+function updatesBody(data) {
+  return `<div class="two">
+      <label class="field">Чаты, раз в минут<input type="number" min="1" id="chat-interval" value="${draft.chat_interval_min}"></label>
+      <label class="field">Новости, раз в минут<input type="number" min="5" id="news-interval" value="${draft.news_interval_min}"></label>
+      <label class="field">Разбор моделью, раз в минут<input type="number" min="5" id="model-interval" value="${draft.model_interval_min}"></label>
+      <label class="field">Полное обновление, час дня<input type="number" min="0" max="23" id="full-hour" value="${draft.full_collect_hour}"></label>
+    </div>
+    <p class="note">Обычная проверка смотрит один список диалогов и читает только чаты, где появилось новое. Полное обновление раз в сутки перечитывает все чаты за три дня.</p>
+    <button class="btn" id="full-run" type="button">Полное обновление сейчас</button>
+    <label class="switch plain first"><input type="checkbox" id="notify-on" ${draft.notify.enabled !== false ? "checked" : ""}>
+      <span>Уведомления Windows<small class="soft">Срок завтра и люди, которые ждут ответа больше суток. Ночью молчат</small></span></label>
+    <label class="switch plain"><input type="checkbox" id="autostart-on" ${data.autostart ? "checked" : ""}>
+      <span>Запускать Пульс при входе в Windows<small class="soft">Работает без окна, адрес тот же. Применяется сразу</small></span></label>`;
+}
+
+function learnedList(title, rows) {
+  if (!rows.length) return "";
+  const line = (r) => `<span class="${r.score > 0 ? "learned-up" : "learned-down"}">${esc(r.name)} ${r.score > 0 ? "+" : "−"}${Math.abs(r.score)}</span>`;
+  return `<p class="note">${esc(title)}: ${rows.map(line).join(", ")}</p>`;
+}
+
+function learnedBody(learned) {
+  const chats = learned.chats.map((c) => `${esc(c.name)}: ${c.count}${c.quiet ? ", стал тише" : ""}`).join("; ");
+  const empty = !learned.marks && !learned.chats.length;
+  if (empty) return '<p class="note">Пока нечему. Отмечайте новости кнопкой «Меньше такого», а чаты кнопкой «Не важно».</p>';
+  return `${learnedList("Темы", learned.topics)}${learnedList("Источники", learned.sources)}
+    ${chats ? `<p class="note">Чаты, отмеченные неважными: ${chats}</p>` : ""}
+    <button class="btn" id="forget" type="button">Забыть всё и начать заново</button>`;
 }
 
 async function paintRemote() {
@@ -887,6 +947,8 @@ function paintSettings(data) {
     ${group("shield", "Приватность", "", privacyBody(data), true)}
     ${group("chat", "Чаты Telegram", data.telegram.connected ? `${draft.tg_private.length} выбрано` : "не подключён", telegramBody(data.telegram))}
     ${group("sliders", "Режимы внимания", String(draft.modes.length), `<p class="note">Множитель темы: 1 как обычно, 2 вдвое важнее, 0 скрыть.</p>${modesBody()}`)}
+    ${group("refresh", "Обновление и уведомления", "", updatesBody(data))}
+    ${group("star", "Чему научился Пульс", String(data.learned.marks + data.learned.chats.length), learnedBody(data.learned))}
     ${group("today", "Телефон", "", '<div id="remote-box"></div>')}
     ${group("layers", "Темы", String(draft.topics.length), `${topics}
       <div class="adder"><input id="add-topic" placeholder="Новая тема" aria-label="Новая тема"><button class="btn" id="add-topic-btn">Добавить</button></div>`)}
@@ -894,10 +956,7 @@ function paintSettings(data) {
       <div class="adder"><input id="add-channel" placeholder="Публичный канал, например durov" aria-label="Имя канала"><button class="btn" id="add-channel-btn">Добавить</button></div>
       <div class="adder"><input id="add-query" placeholder="Новости по запросу" aria-label="Запрос"><select id="add-query-topic" aria-label="Тема запроса">${topicSelect}</select></div>
       <div class="adder"><input id="add-feed" placeholder="Или адрес RSS" aria-label="Адрес ленты"><button class="btn" id="add-feed-btn">Добавить</button></div>`)}
-    ${group("sliders", "Отбор", "", `<div class="two">
-        <label class="field">Новостей на экране<input type="number" min="3" max="20" id="budget" value="${draft.budget_main}"></label>
-        <label class="field">Обновлять, раз в минут<input type="number" min="10" id="interval" value="${draft.collect_interval_min}"></label>
-      </div>
+    ${group("sliders", "Отбор", "", `<label class="field">Новостей на экране<input type="number" min="3" max="20" id="budget" value="${draft.budget_main}"></label>
       <label class="field">Как вас называют в чатах<input id="names" value="${esc(draft.me.names.join(", "))}"></label>
       <label class="field">Чёрный список<textarea id="blacklist">${esc(draft.blacklist.join(", "))}</textarea></label>`)}
     <div class="save-bar"><button class="btn primary" id="save">Сохранить</button></div>`;
@@ -909,7 +968,12 @@ const splitList = (value) => value.split(",").map((s) => s.trim()).filter(Boolea
 
 function readSimpleFields() {
   draft.budget_main = Number(document.getElementById("budget").value);
-  draft.collect_interval_min = Number(document.getElementById("interval").value);
+  draft.chat_interval_min = Number(document.getElementById("chat-interval").value);
+  draft.news_interval_min = Number(document.getElementById("news-interval").value);
+  draft.model_interval_min = Number(document.getElementById("model-interval").value);
+  draft.full_collect_hour = Number(document.getElementById("full-hour").value);
+  draft.notify.enabled = document.getElementById("notify-on").checked;
+  draft.deadlines.promises = document.getElementById("auto-promises").checked;
   draft.me.names = splitList(document.getElementById("names").value);
   draft.blacklist = splitList(document.getElementById("blacklist").value);
   draft.privacy.claude_reads_chats = document.getElementById("claude-chats").checked;
@@ -958,6 +1022,19 @@ function bindSettings(data) {
       }
     };
   });
+  document.getElementById("full-run").onclick = async () => {
+    try { await api("/api/collect", { full: true }); toast("Полное обновление идёт, это пара минут"); } catch (error) { toast(error.message); }
+  };
+  document.getElementById("autostart-on").onchange = async (event) => {
+    try {
+      const state = await api("/api/autostart", { enabled: event.target.checked });
+      toast(state.enabled ? "Пульс будет запускаться при входе в Windows" : "Автозапуск выключен");
+    } catch (error) { toast(error.message); event.target.checked = !event.target.checked; }
+  };
+  const forget = document.getElementById("forget");
+  if (forget) forget.onclick = async () => {
+    try { await api("/api/learned", {}); toast("Отметки сброшены"); renderSettings(); } catch (error) { toast(error.message); }
+  };
   const chatFilter = document.getElementById("chat-filter");
   if (chatFilter) chatFilter.oninput = () => {
     const query = chatFilter.value.toLowerCase();
@@ -1017,7 +1094,19 @@ view.addEventListener("click", async (event) => {
   const chatDone = event.target.closest("[data-chat-done]");
   if (chatDone) {
     event.preventDefault();
-    try { await api("/api/chat-done", { name: chatDone.dataset.chatDone }); toast("Убрано из ждущих ответа"); route(); } catch (error) { toast(error.message); }
+    try { await api("/api/chat-done", { name: chatDone.dataset.chatDone, why: "done" }); toast("Убрано из списка"); route(); } catch (error) { toast(error.message); }
+    return;
+  }
+  const chatSkip = event.target.closest("[data-chat-skip]");
+  if (chatSkip) {
+    event.preventDefault();
+    const name = chatSkip.dataset.chatSkip;
+    try {
+      const state = await api("/api/chat-done", { name, why: "unimportant" });
+      if (state.quiet) toast(`Чат «${name}» теперь «тише»`, "Вернуть", async () => { await api("/api/chat-level", { name, level: "обычно" }); route(); });
+      else toast("Учту. После трёх таких отметок чат станет тише");
+      route();
+    } catch (error) { toast(error.message); }
     return;
   }
   const reopen = event.target.closest("[data-reopen]");
@@ -1137,5 +1226,6 @@ async function route() {
 
 applyTheme(storedTheme());
 setupAsk();
+watchUpdates();
 addEventListener("hashchange", route);
 route();

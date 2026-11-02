@@ -29,7 +29,11 @@ def gn(query, lang="ru"):
 
 DEFAULT_CONFIG = {
     "vault": r"C:\Users\User\Documents\Obsidian Vault",
-    "collect_interval_min": 60,
+    "chat_interval_min": 5,
+    "news_interval_min": 30,
+    "model_interval_min": 30,
+    "full_collect_hour": 5,
+    "notify": {"enabled": True, "quiet_from": 23, "quiet_to": 9},
     "budget_main": 7,
     "topic_cap": 3,
     "news_window_days": 4,

@@ -11,18 +11,20 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import agenda, analysis, assistant, claude_ai, db, deadlines, digest, local_ai, pipeline, remote, summaries, telegram
+from . import agenda, analysis, assistant, autostart, claude_ai, db, deadlines, digest, learning, local_ai, pipeline, remote, summaries, telegram
 from .config import LEVELS, load_config, save_config
 
 _agenda_lock = threading.Lock()
 _remote_server = None
-VERSION = 2
+VERSION = 3
+TICK_SECONDS = 30
 WEB = Path(__file__).parent / "web"
 PORT = int(os.environ.get("PULSE_PORT", 8765))
 ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 SETTINGS_KEYS = {"topics", "feeds", "tg_public", "tg_private", "blacklist", "budget_main",
-                 "topic_cap", "collect_interval_min", "me", "privacy", "deadlines", "claude", "modes"}
-LOOPBACK_ONLY = {"/api/settings", "/api/remote", "/api/shutdown"}  # с телефона это менять нельзя
+                 "topic_cap", "chat_interval_min", "news_interval_min", "model_interval_min", "full_collect_hour",
+                 "notify", "me", "privacy", "deadlines", "claude", "modes"}
+LOOPBACK_ONLY = {"/api/settings", "/api/remote", "/api/shutdown", "/api/autostart", "/api/learned"}  # с телефона это менять нельзя
 PAGE = 40
 MAX_BODY_BYTES = 2_000_000
 
@@ -81,8 +83,11 @@ def feed_payload(query):
 
 def settings_payload():
     cfg = load_config()
+    with db.connect() as conn:
+        learned = learning.view(conn, cfg)
     return {"config": {k: cfg[k] for k in SETTINGS_KEYS}, "local_model": local_ai.cached_model(cfg), "telegram": {
-        "connected": telegram.is_connected(), "dialogs": telegram.load_dialogs()}}
+        "connected": telegram.is_connected(), "dialogs": telegram.load_dialogs()},
+        "learned": learned, "autostart": autostart.is_enabled()}
 
 
 def validate_settings(body):
@@ -96,9 +101,11 @@ def validate_settings(body):
     for mode in clean.get("modes", []):
         mode["budget"] = max(1, min(20, int(mode["budget"])))
         mode["topics"] = {k: max(0.0, min(2.0, float(v))) for k, v in mode["topics"].items()}
-    for key in ("budget_main", "topic_cap", "collect_interval_min"):
+    for key, least in (("budget_main", 1), ("topic_cap", 1), ("chat_interval_min", 1), ("news_interval_min", 5), ("model_interval_min", 5)):
         if key in clean:
-            clean[key] = max(1, int(clean[key]))
+            clean[key] = max(least, int(clean[key]))
+    if "full_collect_hour" in clean:
+        clean["full_collect_hour"] = max(0, min(23, int(clean["full_collect_hour"])))
     return clean
 
 
@@ -157,6 +164,13 @@ def rescore(cfg):
         analysis.run(conn, cfg)
 
 
+def mark_chat(name, why):
+    """«Сделано» просто убирает чат из ждущих, а «Не важно» ещё и учит Пульс."""
+    with db.connect() as conn:
+        analysis.dismiss_chat(conn, name)
+        return {"quiet": why == "unimportant" and learning.note_ignored(conn, load_config(), name)}
+
+
 def update_item(item_id, body):
     fields, args = [], []
     if body.get("state") in ("new", "seen"):
@@ -172,6 +186,8 @@ def update_item(item_id, body):
         raise ValueError("Нечего менять")
     with db.connect() as conn:
         conn.execute(f"UPDATE items SET {', '.join(fields)} WHERE id=?", (*args, item_id))
+    if "feedback" in body:  # отметка должна сказаться сразу, а не при следующем сборе новостей
+        threading.Thread(target=rescore, args=(load_config(),), daemon=True).start()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -254,7 +270,7 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/status":
                 with db.connect() as conn:
                     return self._json({"running": pipeline.is_running(), "stage": pipeline.stage(), "error": pipeline.last_error(),
-                                       "last_run": db.kv_get(conn, "last_run")})
+                                       "last_run": db.kv_get(conn, "last_run"), "marks": db.kv_get(conn, "run_marks", {})})
         except Exception as error:
             return self._json({"error": f"{type(error).__name__}: {error}"}, 500)
         self._static(url.path)
@@ -326,11 +342,16 @@ class Handler(BaseHTTPRequestHandler):
                 threading.Thread(target=pipeline.run_in_background, daemon=True).start()
                 return self._json({"ok": True})
             if path == "/api/collect":
-                threading.Thread(target=pipeline.run_in_background, daemon=True).start()
+                threading.Thread(target=pipeline.run_in_background, args=(bool(body.get("full")),), daemon=True).start()
                 return self._json({"ok": True})
             if path == "/api/chat-done":
+                return self._json({"ok": True, **mark_chat(body.get("name"), body.get("why"))})
+            if path == "/api/autostart":
+                return self._json({"enabled": autostart.set_enabled(bool(body.get("enabled")))})
+            if path == "/api/learned":
                 with db.connect() as conn:
-                    analysis.dismiss_chat(conn, body.get("name"))
+                    learning.forget(conn)
+                threading.Thread(target=rescore, args=(load_config(),), daemon=True).start()
                 return self._json({"ok": True})
         except ValueError as error:
             return self._json({"error": str(error)}, 400)
@@ -342,20 +363,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def scheduler():
-    """Пока сервер запущен, сбор идёт сам с заданным интервалом."""
+    """Пока сервер запущен, чаты и новости обновляются сами, каждый со своим интервалом."""
     while True:
-        interval = load_config()["collect_interval_min"] * 60
-        with db.connect() as conn:
-            last = db.kv_get(conn, "last_run")
-        age = time.time() - datetime.fromisoformat(last["at"]).timestamp() if last else interval
-        if age >= interval:
-            try:
-                pipeline.run_collection()
-            except Exception as error:
-                print(f"Сбор не удался: {error}")
-            time.sleep(60)
-        else:
-            time.sleep(min(interval - age + 1, 300))
+        try:
+            pipeline.run_collection(force=False)
+        except Exception as error:
+            print(f"Сбор не удался: {error}")
+        time.sleep(TICK_SECONDS)
 
 
 class Server(ThreadingHTTPServer):

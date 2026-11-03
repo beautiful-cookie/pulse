@@ -419,7 +419,7 @@ function doColumn(data) {
   </section>`;
 }
 
-const ASK_HINTS = ["Что важного в чатах?", "Какие сроки на этой неделе?", "Кто ждёт моего ответа?"];
+const ASK_HINTS = ["Что интересного?", "Что важного в чатах?", "Кто ждёт моего ответа?", "За чем ты следишь?"];
 const askLog = [];
 
 const askPanel = document.getElementById("ask-panel");
@@ -560,6 +560,28 @@ function topicPicker() {
   return `<select class="topic-pick" id="topic-pick" aria-label="Тема новостей"><option value="">Главное</option>${options}</select>`;
 }
 
+function pickRow(pick) {
+  const link = safeUrl(pick.link);
+  const external = link.startsWith("http") ? 'target="_blank" rel="noreferrer noopener"' : "";
+  const head = [pick.source, pick.author].filter(Boolean).join(" · ");
+  return `<article class="pick" data-pick="${esc(pick.uid)}" data-id="${pick.id}">
+    <div class="pick-head"><span>${esc(head)}</span><span>${esc(ago(pick.published))}</span></div>
+    <button class="pick-gist" data-pick-open aria-expanded="false">${esc(pick.gist)}</button>
+    ${pick.why ? `<div class="pick-why">${esc(pick.why)}</div>` : ""}
+    <div class="pick-full" hidden>${esc(pick.body)}</div>
+    <div class="pick-tools">
+      ${link ? `<a class="tool" href="${esc(link)}" ${external} title="Открыть в Telegram" aria-label="Открыть в Telegram">${icon("open")}</a>` : ""}
+      <button class="tool ${pick.liked ? "on" : ""}" data-pick-rate="1" title="Интересно: похожее будет чаще" aria-label="Интересно">${icon("up")}</button>
+      <button class="tool" data-pick-rate="-1" title="Не то: похожее будет реже" aria-label="Не то">${icon("down")}</button>
+    </div>
+  </article>`;
+}
+
+function picksBlock(chosen) {
+  if (!chosen?.length) return "";
+  return `<section class="picks"><div class="news-label">Для вас</div>${chosen.map(pickRow).join("")}</section>`;
+}
+
 function briefBlock(brief) {
   if (brief.author !== "claude") return "";
   const sourceLinks = (s) => (s.sources || []).filter((l) => safeUrl(l.url))
@@ -614,6 +636,7 @@ function renderToday(data) {
       ${doColumn(data)}
       <section class="col" id="news-panel">
         <h2 class="sec">Знать<button class="digest-btn" id="digest-btn" type="button" title="Claude соберёт сводку новостей. Чаты в неё не попадают">${icon("spark")}<span>Сводка от Claude</span></button></h2>
+        ${picksBlock(data.picks)}
         ${briefBlock(data.brief)}
         <div class="news-head"><span>Новости</span>${topicPicker()}</div>
         <div id="news"></div>
@@ -676,7 +699,7 @@ async function startCollect() {
 }
 
 const isCalm = () => !document.hidden && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName)
-  && !view.querySelector(".news-more:not([hidden]), details[open]");
+  && !view.querySelector(".news-more:not([hidden]), .pick-full:not([hidden]), details[open]");
 
 function watchUpdates() {
   // Сбор идёт сам: страница подхватывает новое, если вы ничего не читаете и не вводите
@@ -927,6 +950,22 @@ function updatesBody(data) {
       <span>Запускать Пульс при входе в Windows<small class="soft">Работает без окна, адрес тот же. Применяется сразу</small></span></label>`;
 }
 
+function interestsBody(data) {
+  const prefs = draft.interests;
+  const chips = prefs.watch.map((name, i) => `<span class="watch-chip">${esc(name)}<button type="button" class="tool" data-unwatch="${i}" aria-label="Не следить за ${esc(name)}">${icon("close")}</button></span>`).join("");
+  return `<p class="note">За кем следить. Локальная модель прочитает их сообщения и посты и коротко перескажет интересное в блоке «Для вас». То же можно сказать в окне «Спросить»: «Следи за …», «Не следи за …».</p>
+    <div class="watch-list">${chips || '<span class="note">Пока ни за кем</span>'}</div>
+    <div class="adder"><input id="watch-add" list="known-names" placeholder="Канал, чат или человек" aria-label="За кем следить" autocomplete="off">
+      <datalist id="known-names">${data.known_names.map((n) => `<option value="${esc(n)}">`).join("")}</datalist>
+      <button class="btn" id="watch-add-btn" type="button">Следить</button></div>
+    <label class="field">Что мне интересно, по теме на строку<textarea id="about" placeholder="философия сознания&#10;нейроинтерфейсы">${esc(prefs.about.join("\n"))}</textarea></label>`;
+}
+
+let settingsData = null;
+function renderSettingsAgain() {
+  if (settingsData) paintSettings(settingsData);
+}
+
 function learnedList(title, rows) {
   if (!rows.length) return "";
   const line = (r) => `<span class="${r.score > 0 ? "learned-up" : "learned-down"}">${esc(r.name)} ${r.score > 0 ? "+" : "−"}${Math.abs(r.score)}</span>`;
@@ -960,6 +999,7 @@ async function paintRemote() {
 }
 
 function paintSettings(data) {
+  settingsData = data;
   const topics = draft.topics.map((t, i) => `<details class="topic-row">
       <summary><span class="dot" style="--dot:${topicColor(t.id)}"></span>${esc(t.name)}<small>вес ${t.weight}</small></summary>
       <div class="two">
@@ -982,6 +1022,7 @@ function paintSettings(data) {
     ${group("shield", "Приватность", "", privacyBody(data), true)}
     ${group("chat", "Чаты Telegram", data.telegram.connected ? `${draft.tg_private.length} выбрано` : "не подключён", telegramBody(data.telegram))}
     ${group("sliders", "Режимы внимания", String(draft.modes.length), `<p class="note">Множитель темы: 1 как обычно, 2 вдвое важнее, 0 скрыть.</p>${modesBody()}`)}
+    ${group("star", "Мои интересы", String(draft.interests.watch.length), interestsBody(data), true)}
     ${group("refresh", "Обновление и уведомления", "", updatesBody(data))}
     ${group("star", "Чему научился Пульс", String(data.learned.marks + data.learned.chats.length), learnedBody(data.learned))}
     ${group("today", "Телефон", "", '<div id="remote-box"></div>')}
@@ -1009,6 +1050,7 @@ function readSimpleFields() {
   draft.full_collect_hour = Number(document.getElementById("full-hour").value);
   draft.notify.enabled = document.getElementById("notify-on").checked;
   draft.deadlines.promises = document.getElementById("auto-promises").checked;
+  draft.interests.about = document.getElementById("about").value.split("\n").map((s) => s.trim()).filter(Boolean);
   draft.me.names = splitList(document.getElementById("names").value);
   draft.blacklist = splitList(document.getElementById("blacklist").value);
   draft.privacy.claude_reads_chats = document.getElementById("claude-chats").checked;
@@ -1057,6 +1099,14 @@ function bindSettings(data) {
       }
     };
   });
+  document.getElementById("watch-add-btn").onclick = () => {
+    const name = document.getElementById("watch-add").value.trim();
+    if (!name) return;
+    readSimpleFields();
+    if (!draft.interests.watch.some((w) => w.toLowerCase() === name.toLowerCase())) draft.interests.watch.push(name);
+    paintSettings(data);
+    toast("Добавлено. Нажмите «Сохранить»");
+  };
   document.getElementById("full-run").onclick = async () => {
     try { await api("/api/collect", { full: true }); toast("Полное обновление идёт, это пара минут"); } catch (error) { toast(error.message); }
   };
@@ -1148,6 +1198,32 @@ view.addEventListener("click", async (event) => {
       await vanish(chatSkip.closest(".do-row"));
       route();
     } catch (error) { toast(error.message); }
+    return;
+  }
+  const pickOpen = event.target.closest("[data-pick-open]");
+  if (pickOpen) {
+    const full = pickOpen.closest(".pick").querySelector(".pick-full");
+    full.hidden = !full.hidden;
+    pickOpen.setAttribute("aria-expanded", String(!full.hidden));
+    return;
+  }
+  const pickRate = event.target.closest("[data-pick-rate]");
+  if (pickRate) {
+    const card = pickRate.closest(".pick");
+    const value = Number(pickRate.dataset.pickRate);
+    const liked = value > 0 && !pickRate.classList.contains("on");
+    try {
+      await api("/api/pick", { uid: card.dataset.pick, feedback: value < 0 ? -1 : liked ? 1 : 0 });
+      if (value < 0) { toast("Учту: похожее будет реже"); vanish(card); }
+      else { pickRate.classList.toggle("on", liked); if (liked) toast("Учту: похожее будет чаще"); }
+    } catch (error) { toast(error.message); }
+    return;
+  }
+  const unwatch = event.target.closest("[data-unwatch]");
+  if (unwatch) {
+    readSimpleFields();
+    draft.interests.watch.splice(Number(unwatch.dataset.unwatch), 1);
+    renderSettingsAgain();
     return;
   }
   const reopen = event.target.closest("[data-reopen]");

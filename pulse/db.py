@@ -81,6 +81,15 @@ CREATE TABLE IF NOT EXISTS reply_checks (
   needs INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS picks (
+  uid TEXT PRIMARY KEY,
+  interesting INTEGER NOT NULL,
+  gist TEXT NOT NULL,
+  why TEXT NOT NULL DEFAULT '',
+  feedback INTEGER NOT NULL DEFAULT 0,  -- +1 интересно, -1 не то
+  created TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 """
 

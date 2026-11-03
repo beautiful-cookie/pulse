@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import agenda, analysis, assistant, autostart, claude_ai, db, deadlines, digest, learning, local_ai, pipeline, remote, summaries, telegram
+from . import agenda, analysis, assistant, autostart, claude_ai, db, deadlines, digest, interests, learning, local_ai, picks, pipeline, remote, summaries, telegram
 from .config import LEVELS, load_config, save_config
 
 _agenda_lock = threading.Lock()
@@ -23,7 +23,7 @@ PORT = int(os.environ.get("PULSE_PORT", 8765))
 ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 SETTINGS_KEYS = {"topics", "feeds", "tg_public", "tg_private", "blacklist", "budget_main",
                  "topic_cap", "chat_interval_min", "news_interval_min", "model_interval_min", "full_collect_hour",
-                 "notify", "me", "privacy", "deadlines", "claude", "modes"}
+                 "notify", "interests", "me", "privacy", "deadlines", "claude", "modes"}
 LOOPBACK_ONLY = {"/api/settings", "/api/remote", "/api/shutdown", "/api/autostart", "/api/learned"}  # с телефона это менять нельзя
 PAGE = 40
 MAX_BODY_BYTES = 2_000_000
@@ -33,6 +33,7 @@ def today_payload():
     cfg = load_config()
     with db.connect() as conn:
         view = analysis.today_view(conn, cfg)
+        view["picks"] = picks.shown(conn)
     brief = pipeline.load_brief()
     if brief and brief.get("date") == date.today().isoformat():
         view["brief"] = {**brief, "author": "claude"}
@@ -85,9 +86,10 @@ def settings_payload():
     cfg = load_config()
     with db.connect() as conn:
         learned = learning.view(conn, cfg)
+        known = interests.known_names(conn, cfg)
     return {"config": {k: cfg[k] for k in SETTINGS_KEYS}, "local_model": local_ai.cached_model(cfg), "telegram": {
         "connected": telegram.is_connected(), "dialogs": telegram.load_dialogs()},
-        "learned": learned, "autostart": autostart.is_enabled()}
+        "learned": learned, "autostart": autostart.is_enabled(), "known_names": known}
 
 
 def validate_settings(body):
@@ -104,6 +106,10 @@ def validate_settings(body):
     for key, least in (("budget_main", 1), ("topic_cap", 1), ("chat_interval_min", 1), ("news_interval_min", 5), ("model_interval_min", 5)):
         if key in clean:
             clean[key] = max(least, int(clean[key]))
+    if "interests" in clean:
+        prefs = clean["interests"]
+        clean["interests"] = {"about": [str(a).strip()[:200] for a in prefs.get("about", []) if str(a).strip()][:40],
+                              "watch": [str(w).strip()[:120] for w in prefs.get("watch", []) if str(w).strip()][:60]}
     if "full_collect_hour" in clean:
         clean["full_collect_hour"] = max(0, min(23, int(clean["full_collect_hour"])))
     return clean
@@ -346,6 +352,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True})
             if path == "/api/chat-done":
                 return self._json({"ok": True, **mark_chat(body.get("name"), body.get("why"))})
+            if path == "/api/pick":
+                with db.connect() as conn:
+                    picks.rate(conn, str(body.get("uid")), body.get("feedback"))
+                return self._json({"ok": True})
             if path == "/api/autostart":
                 return self._json({"enabled": autostart.set_enabled(bool(body.get("enabled")))})
             if path == "/api/learned":

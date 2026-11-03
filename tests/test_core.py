@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pulse import agenda, analysis, assistant, autostart, claude_ai, db, deadlines, digest, feeds, learning, local_ai, mcp_server, notify, obsidian, pipeline, promises, remote, replies, summaries, telegram
+from pulse import agenda, analysis, assistant, autostart, claude_ai, db, deadlines, digest, feeds, interests, learning, local_ai, mcp_server, notify, obsidian, picks, pipeline, promises, remote, replies, summaries, telegram
 from pulse.config import DEFAULT_CONFIG, active_mode
 from pulse.text import extract_due, keyword_regex, stem
 
@@ -1861,6 +1861,126 @@ class WeekReview(unittest.TestCase):
         conn.execute("UPDATE items SET tier='high'")
         week = analysis.week_view(conn, {**DEFAULT_CONFIG, "tg_private": []})
         self.assertEqual((week["overdue_total"], week["waiting_for"]), (1, 1))
+
+
+class Interests(unittest.TestCase):
+    def setUp(self):
+        self.conn = memory_db()
+        for uid, source, author in (("tgp-1", ".intuition-", ".intuition-"), ("tg-2-1", "Олег Телемский", "Олег Телемский"),
+                                    ("tg-3-1", "Поток", "Олег Петров"), ("tg-4-1", "Антон Кузнецов: философия", "Антон Кузнецов: философия")):
+            db.upsert_item(self.conn, {"uid": uid, "kind": "post", "source_type": "tg_public", "source_name": source, "title": "т",
+                                       "body": "Длинный пост " * 20, "author": author, "published": db.now_iso()})
+        self.cfg = {"tg_private": [], "tg_public": [], "interests": {"about": [], "watch": []}, "topics": []}
+
+    def say(self, text):
+        with patch.object(interests, "save_config", lambda c: None):
+            return interests.command(self.conn, self.cfg, text)
+
+    def test_names_from_a_sentence(self):
+        reply = self.say("Мне интересно что о чем пишет Антон Кузнецов, Олег Телемский и .intuition")
+        self.assertEqual(self.cfg["interests"]["watch"], ["Антон Кузнецов: философия", "Олег Телемский", ".intuition-"])
+        self.assertIn("Слежу за", reply)
+
+    def test_topic_is_remembered_and_forgotten(self):
+        self.say("Мне интересна философия сознания")
+        self.assertEqual(self.cfg["interests"]["about"], ["философия сознания"])
+        self.say("Мне больше не интересна философия сознания")
+        self.assertEqual(self.cfg["interests"]["about"], [])
+
+    def test_unwatch(self):
+        self.say("Следи за .intuition")
+        self.say("Не следи за .intuition")
+        self.assertEqual(self.cfg["interests"]["watch"], [])
+
+    def test_question_is_not_a_command(self):
+        self.assertIsNone(self.say("Мне интересно, писали ли в чате про экскурсию?"))
+        self.assertIsNone(self.say("Что нового в чатах?"))
+
+    def test_shows_what_it_remembers(self):
+        self.say("Следи за Олегом Телемским")
+        self.assertIn("Олег Телемский", self.say("За чем ты следишь?"))
+
+
+class Picks(unittest.TestCase):
+    def setUp(self):
+        self.conn = memory_db()
+        self.add("tg-1-1", "Канал А", "Пост про сознание и квалиа. " * 20)
+        self.add("tg-2-1", "Канал Б", "Короткое")
+        self.add("tg-3-1", "Канал В", "Длинный пост про рецепты борща. " * 20)
+        self.cfg = {"tg_private": [{"name": "Канал А", "kind": "канал"}, {"name": "Канал В", "kind": "канал"}], "tg_public": [],
+                    "interests": {"about": [], "watch": ["Канал А", "Канал Б"]}, "topics": [{"name": "Сознание", "weight": 1.4}]}
+
+    def add(self, uid, source, body):
+        db.upsert_item(self.conn, {"uid": uid, "kind": "message", "source_type": "tg_private", "source_name": source, "title": body[:40],
+                                   "body": body, "author": "Автор", "published": db.now_iso(), "meta": {"chat_id": int(uid.split("-")[1]), "chat_kind": "канал"}})
+
+    def test_only_watched_and_long_enough(self):
+        self.assertEqual([c["uid"] for c in picks.candidates(self.conn, self.cfg)], ["tg-1-1"])
+        self.cfg["interests"]["about"] = ["философия сознания"]
+        self.assertEqual(sorted(c["uid"] for c in picks.candidates(self.conn, self.cfg)), ["tg-1-1", "tg-3-1"])
+
+    def test_model_decides_and_learns_from_marks(self):
+        self.cfg["interests"]["about"] = ["философия сознания"]
+        prompts = []
+
+        def ask(cfg, model, system, user, max_tokens):
+            prompts.append(system)
+            if "борща" in user:
+                return "ИНТЕРЕСНО: нет\nСУТЬ: Рецепт\nПОЧЕМУ: не по теме"
+            return "ИНТЕРЕСНО: да\nСУТЬ: Разбор квалиа\nПОЧЕМУ: философия сознания"
+        with patch.object(local_ai, "ask", ask):
+            self.assertEqual(picks.process(self.conn, self.cfg, {}, "gemma"), 1)
+        shown = picks.shown(self.conn)
+        self.assertEqual([(p["gist"], p["why"]) for p in shown], [("Разбор квалиа", "философия сознания")])
+        self.assertIn("философия сознания", prompts[0])
+        picks.rate(self.conn, "tg-1-1", 1)
+        self.assertIn("Разбор квалиа", picks.profile_text(self.cfg, self.conn))
+        picks.rate(self.conn, "tg-1-1", -1)
+        self.assertEqual(picks.shown(self.conn), [])
+
+    def test_without_model_only_watched_with_their_own_words(self):
+        self.cfg["interests"]["about"] = ["философия сознания"]
+        self.assertEqual(picks.process(self.conn, self.cfg), 1)
+        self.assertTrue(picks.shown(self.conn)[0]["gist"].startswith("Пост про сознание"))
+        self.assertEqual(len(picks.candidates(self.conn, self.cfg)), 1, "чужой канал ждёт модель")
+
+    def test_broken_model_answer_stops_quietly(self):
+        with patch.object(local_ai, "ask", lambda *a, **k: "что-то не то"):
+            self.assertEqual(picks.process(self.conn, self.cfg, {}, "gemma"), 0)
+
+    def test_what_is_interesting_comes_from_picks(self):
+        picks.remember(self.conn, "tg-1-1", True, "Разбор квалиа", "")
+        self.assertTrue(assistant.asks_for_picks("Что интересного?"))
+        self.assertFalse(assistant.asks_for_picks("Что интересного в канале .intuition?"))
+        self.assertFalse(assistant.asks_for_picks("А что интересного по темам?", [{"role": "user", "text": "Что в канале .intuition?"}]))
+        result = assistant.picks_answer(self.conn)
+        self.assertIn("Канал А: Разбор квалиа", result["answer"])
+        self.assertEqual(result["quotes"][0]["source"], "Канал А")
+
+
+class AskConversation(unittest.TestCase):
+    def setUp(self):
+        self.conn = memory_db()
+        for n, text in enumerate(("Сходил на съёмки подкаста про тело", "Новый разбор книги о сознании")):
+            db.upsert_item(self.conn, {"uid": f"tgp-x-{n}", "kind": "post", "source_type": "tg_public", "source_name": ".intuition-",
+                                       "title": text, "body": text, "author": ".intuition-", "published": db.now_iso()})
+        db.upsert_item(self.conn, {"uid": "tg-5-1", "kind": "message", "source_type": "tg_private", "source_name": "Быт",
+                                   "title": "Кастрюля", "body": "Кто забыл кастрюлю", "published": db.now_iso()})
+
+    def test_follow_up_keeps_the_channel(self):
+        history = [{"role": "user", "text": "Что есть интересного в канале .intuition?"}, {"role": "bot", "text": "Таро"}]
+        context, sources, _ = assistant.gather(self.conn, "А конкретно что интересного по темам?", None, history)
+        self.assertIn("разбор книги", context)
+        self.assertNotIn("кастрюлю", context)
+        self.assertEqual(sources, [".intuition-"])
+
+    def test_yes_no_rule_only_for_yes_no_questions(self):
+        self.assertTrue(assistant.YES_NO.search("Писали ли в чате про экскурсию?"))
+        self.assertFalse(assistant.YES_NO.search("Что интересного по темам?"))
+
+    def test_channel_author_is_not_repeated_in_quote(self):
+        row = self.conn.execute("SELECT * FROM items WHERE uid='tgp-x-0'").fetchone()
+        self.assertEqual(assistant.quote(row)["author"], "")
 
 
 class ArticleSummaries(unittest.TestCase):

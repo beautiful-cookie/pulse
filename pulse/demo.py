@@ -66,6 +66,8 @@ def build():
     target.execute("DELETE FROM chat_digests")
     target.execute("CREATE TABLE IF NOT EXISTS chat_deadlines (key TEXT PRIMARY KEY, chat TEXT NOT NULL, due TEXT NOT NULL, status TEXT NOT NULL, written TEXT NOT NULL DEFAULT '', created TEXT NOT NULL)")
     target.execute("DELETE FROM chat_deadlines")
+    target.execute("CREATE TABLE IF NOT EXISTS picks (uid TEXT PRIMARY KEY, interesting INTEGER NOT NULL, gist TEXT NOT NULL, why TEXT NOT NULL DEFAULT '', feedback INTEGER NOT NULL DEFAULT 0, created TEXT NOT NULL)")
+    target.execute("DELETE FROM picks")
 
     now = datetime.now(timezone.utc)
     for name, kind, chat_id, author, text, mentioned, hours, count in CHATS:
@@ -92,6 +94,15 @@ def build():
          now.isoformat(timespec="seconds"), now.isoformat(timespec="seconds"), json.dumps({"chat_id": 1003, "chat_kind": "личный"})))
     for chat, (summary, action) in DIGESTS.items():
         target.execute("INSERT INTO chat_digests VALUES (?,?,?,?,?)", (chat, summary, action, "demo", now.isoformat()))
+    long_text = ("Собрали материалы к защите кейса: как нейроинтерфейсы меняют реабилитацию после инсульта, "
+                 "три исследования за год и разбор, почему метрики точности обманчивы. Нужна помощь с разделом про этику. ") * 2
+    target.execute(
+        """INSERT INTO items (uid, kind, source_type, source_name, title, body, url, author, published, collected, meta)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        ("tg--1004-2000", "message", "tg_private", "Хакатон: команда", long_text[:80], long_text, "", "Олег",
+         now.isoformat(timespec="seconds"), now.isoformat(timespec="seconds"), json.dumps({"chat_id": -1004, "chat_kind": "группа"})))
+    target.execute("INSERT INTO picks VALUES (?,?,?,?,?,?)", ("tg--1004-2000", 1, "Команда собрала материалы о нейроинтерфейсах в реабилитации и просит помочь с разделом про этику.",
+                                                            "нейроинтерфейсы и этика, вы следите за командой", 0, now.isoformat()))
     target.commit()
     target.close()
 
@@ -106,6 +117,7 @@ def build():
     config["tg_public"] = []
     config["chat_interval_min"] = config["news_interval_min"] = config["model_interval_min"] = 10_000_000
     config["notify"] = {"enabled": False}
+    config["interests"] = {"about": ["философия сознания", "нейроинтерфейсы"], "watch": ["Хакатон: команда"]}
     config["local_ai"] = {**config.get("local_ai", {}), "url": f"http://127.0.0.1:{FAKE_MODEL_PORT}/v1", "external": True, "max_chats_per_run": 15}
     config["remote"] = {"enabled": False, "key": ""}
     (DEMO / "config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2), "utf-8")

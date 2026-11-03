@@ -34,6 +34,7 @@ DEFAULT_CONFIG = {
     "model_interval_min": 30,
     "full_collect_hour": 5,
     "notify": {"enabled": True, "quiet_from": 23, "quiet_to": 9},
+    "interests": {"about": [], "watch": []},
     "budget_main": 7,
     "topic_cap": 3,
     "news_window_days": 4,

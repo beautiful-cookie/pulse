@@ -1223,6 +1223,16 @@ class Assistant(unittest.TestCase):
         answer = assistant.tasks_answer(self.conn, cfg)["answer"]
         self.assertTrue(answer.startswith("Самое важное сейчас: Сдать эссе"))
 
+    def test_named_chat_is_searched_even_for_a_long_question(self):
+        for n, text in enumerate(("Давайте я сделаю презентацию к рассказу", "Отлично, тогда до вечера", "Кто идёт в кино?")):
+            db.upsert_item(self.conn, {"uid": f"tg-9-{n}", "kind": "message", "source_type": "tg_private", "source_name": "Диптех головного мозга 2026 Chat",
+                                       "title": text, "body": text, "author": "Олег", "published": db.now_iso()})
+        question = "Говорили ли в чате по диптеху сделать презентацию для нашего рассказа по экскурсии по офису?"
+        context, sources = assistant.build_context(self.conn, question)
+        self.assertIn("сделаю презентацию", context)
+        self.assertNotIn("кастрюлю", context)
+        self.assertEqual(sources, ["Диптех головного мозга 2026 Chat"])
+
     def test_one_stray_word_is_not_a_match(self):
         self.assertEqual(assistant.search(self.conn, "эссе кастрюлю поездка билеты самолёт"), [])
 
@@ -1272,6 +1282,7 @@ class Replies(unittest.TestCase):
     def test_unclear_long_personal_message_is_shown_until_checked(self):
         self.assertTrue(analysis.needs_reply(self.item("Я тут подумала про завтрашний план на вечер"), {}))
         self.assertFalse(analysis.needs_reply(self.item("Завтра буду"), {}))
+        self.assertFalse(analysis.needs_reply(self.item("Ну, ты конечно преувеличил"), {}))
 
     def conn(self):
         conn = sqlite3.connect(":memory:")
@@ -1678,6 +1689,13 @@ class Queue(unittest.TestCase):
     def test_my_promise_does_not_hide_a_chat(self):
         rows = analysis.do_queue([self.task("Обещание: Скинуть файл · Вера", "2026-11-05", agenda.CHAT_SECTION)],
                                  [self.chat("Вера", action="Посмотреть договор")], self.TODAY)
+        self.assertEqual(len(rows), 2)
+
+    def test_chat_retelling_my_task_is_dropped(self):
+        rows = analysis.do_queue([self.task("Диптех 18:30. Подготовить презентации", "2026-11-03")],
+                                 [self.chat("Диптех головного мозга 2026 Chat", action="Согласиться на встречу во вторник в 18:30")], self.TODAY)
+        self.assertEqual(len(rows), 1)
+        rows = analysis.do_queue([self.task("Сдать эссе", "2026-11-05")], [self.chat("турклуб", action="Добавить Машу в команду хакатона")], self.TODAY)
         self.assertEqual(len(rows), 2)
 
     def test_same_task_twice_is_shown_once(self):

@@ -63,7 +63,7 @@ main:focus { outline: none; }
 .rail a[aria-current="page"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .rail-theme { margin-top: auto; border: 0; background: none; color: var(--muted); padding: 8px; border-radius: 9px; display: grid; place-items: center; }
 .rail-theme:hover { background: var(--surface-2); color: var(--ink); }
-main { padding: 22px clamp(16px, 3vw, 32px) 64px; max-width: 1240px; width: 100%; margin: 0 auto; }
+main { padding: 22px clamp(16px, 3vw, 32px) 96px; max-width: 1240px; width: 100%; margin: 0 auto; }
 
 .top { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
 .top h1 { font: 700 24px/1.2 var(--serif); }
@@ -278,7 +278,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .brand { display: none; }
   .rail a { flex: 1; padding: 5px 2px; }
   .rail-theme { margin: 0; }
-  main { padding: 16px 16px 24px; }
+  main { padding: 16px 16px 120px; }
   .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .tile { padding: 9px 12px; }
   .tile b { font-size: 26px; }

@@ -18,6 +18,7 @@ from .text import extract_due, keyword_regex, stems
 
 ANALYSIS_DAYS = 21
 FRESH_HOURS = 6
+TIME_RE = re.compile(r"(?<!\d)\d{1,2}:\d{2}(?!\d)")
 FRESH_SHOWN = 3
 WEEK_SHOWN = 6
 ACTION_HOURS = 24
@@ -446,7 +447,8 @@ def do_queue(actions, signals, today):
 
     def repeats_task(chat):
         same_chat = any(chat["name"] in t["title"] for t in from_chats)
-        return same_chat or any(t["due"] == chat["due"] for t in from_chats if chat["due"])
+        same_due = any(t["due"] == chat["due"] for t in from_chats if chat["due"])
+        return same_chat or same_due or any(same_matter(chat, t) for t in actions)
 
     rows, seen = [], set()
     for task in actions:
@@ -459,6 +461,14 @@ def do_queue(actions, signals, today):
         if chat["reply"] or ((chat["due"] or chat["action"]) and not repeats_task(chat)):
             rows.append({"chat": chat, "rank": 2 if chat["reply"] else rank(chat["due"]) if chat["due"] else 3, "due": chat["due"]})
     return sorted(rows, key=lambda r: (r["rank"], r["due"] or "9999"))
+
+
+def same_matter(chat, task):
+    """Дело из чата пересказывает ваше дело: общее слово и то же время или два общих слова."""
+    chat_text = f"{chat['name']} {chat['action'] or ''}"
+    shared = set(stems(chat_text)) & set(stems(task["title"]))
+    same_time = bool(set(TIME_RE.findall(chat_text)) & set(TIME_RE.findall(task["title"])))
+    return len(shared) >= 2 or (len(shared) >= 1 and same_time)
 
 
 def fresh_news(stream, shown_clusters, now):

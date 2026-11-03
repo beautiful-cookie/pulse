@@ -139,7 +139,7 @@ function newsRow(item) {
       <div class="why">${[...topics, ...item.reasons].map((r) => `<span>${esc(r)}</span>`).join("")}</div>
       <div class="summary-box" hidden></div>
       <div class="acts">
-        ${item.source_type === "tg_private" ? "" : `<button data-summary>${icon("note")}<span>Саммари</span></button>
+        ${item.source_type === "tg_private" || /^https:\/\/t\.me\/c\//.test(item.url || "") ? "" : `<button data-summary>${icon("note")}<span>Саммари</span></button>
         <button data-summary="claude" title="Саммари делает Claude: читает статью и находит её сам">${icon("spark")}<span>Claude</span></button>`}
         <button data-act="up" class="${item.feedback > 0 ? "on" : ""}">${icon("up")}Важно</button>
         <button data-act="down" class="${item.feedback < 0 ? "on" : ""}">${icon("down")}Не важно</button>
@@ -419,7 +419,14 @@ function doColumn(data) {
   </section>`;
 }
 
-const ASK_HINTS = ["Что интересного?", "Что важного в чатах?", "Кто ждёт моего ответа?", "За чем ты следишь?"];
+const ASK_HINTS = {
+  local: ["Что интересного?", "Что важного в чатах?", "Кто ждёт моего ответа?", "За чем ты следишь?"],
+  claude: ["Найди фриланс-заказы под мой профиль", "Что обсуждают в открытых чатах?", "Какие вакансии и стажировки появились?"],
+};
+const ASK_ENGINE_KEY = "pulse-ask-engine";
+let askEngine = "local";
+let localReady = false;
+let claudeReady = false;
 const askLog = [];
 
 const askPanel = document.getElementById("ask-panel");
@@ -428,11 +435,14 @@ const ASK_POSITION_KEY = "pulse-ask-position";
 function paintAsk() {
   const box = document.getElementById("ask-log");
   if (!askLog.length) {
-    box.innerHTML = `<p class="empty">Что вас интересует?</p><div class="ask-hints">${ASK_HINTS.map((h) => `<button type="button" class="chip" data-hint="${esc(h)}">${esc(h)}</button>`).join("")}</div>`;
+    const intro = askEngine === "claude" ? "Claude видит только открытые группы, посты каналов и новости за неделю. Личные и закрытые чаты к нему не уходят."
+      : "Что вас интересует?";
+    box.innerHTML = `<p class="empty">${esc(intro)}</p><div class="ask-hints">${ASK_HINTS[askEngine].map((h) => `<button type="button" class="chip" data-hint="${esc(h)}">${esc(h)}</button>`).join("")}</div>`;
     return;
   }
-  const text = (m) => (m.pending ? '<span class="typing" aria-label="Модель думает"><i></i><i></i><i></i></span>' : esc(m.text));
-  box.innerHTML = askLog.map((m) => `<div class="bubble ${m.role}">${text(m)}${quotesHtml(m.quotes)}${!m.quotes?.length && m.sources?.length ? `<div class="bubble-source">${esc(m.sources.join(", "))}</div>` : ""}</div>`).join("");
+  const text = (m) => (m.pending ? `<span class="typing" aria-label="Думает"><i></i><i></i><i></i></span>${m.engine === "claude" ? '<span class="typing-note">Claude читает открытые чаты, до пары минут</span>' : ""}` : esc(m.text));
+  const engine = (m) => (m.role === "bot" && m.engine === "claude" && !m.pending ? `<div class="bubble-engine">Claude${m.read ? ` · прочитал ${m.read} сообщений` : ""}</div>` : "");
+  box.innerHTML = askLog.map((m) => `<div class="bubble ${m.role}">${engine(m)}${text(m)}${quotesHtml(m.quotes)}${!m.quotes?.length && m.sources?.length ? `<div class="bubble-source">${esc(m.sources.join(", "))}</div>` : ""}</div>`).join("");
   box.scrollTop = box.scrollHeight;
 }
 
@@ -446,15 +456,28 @@ function quotesHtml(quotes) {
   }).join("")}</div>`;
 }
 
+async function askClaude(question, history) {
+  const job = await api("/api/ask-claude", { question, history });
+  for (let attempt = 0; attempt < 160; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    const state = await api(`/api/ask-claude?id=${encodeURIComponent(job.id)}`);
+    if (state.status === "done") return state;
+    if (state.status === "error") throw new Error(state.error);
+  }
+  throw new Error("Claude не ответил за шесть минут");
+}
+
 async function sendQuestion(question) {
   const text = question.trim();
   if (!text) return;
-  const history = askLog.filter((m) => !m.pending).map(({ role, text: t }) => ({ role, text: t }));
-  askLog.push({ role: "user", text }, { role: "bot", text: "Думаю…", pending: true });
+  const engine = askEngine;
+  // У каждого свой разговор: локальная модель не видит ответов Claude, и наоборот
+  const history = askLog.filter((m) => !m.pending && (m.engine || "local") === engine).map(({ role, text: t }) => ({ role, text: t }));
+  askLog.push({ role: "user", text, engine }, { role: "bot", text: "Думаю…", pending: true, engine });
   paintAsk();
   try {
-    const data = await api("/api/ask", { question: text, history });
-    askLog[askLog.length - 1] = { role: "bot", text: data.answer, sources: data.sources, quotes: data.quotes };
+    const data = engine === "claude" ? await askClaude(text, history) : await api("/api/ask", { question: text, history });
+    askLog[askLog.length - 1] = { role: "bot", text: data.answer, sources: data.sources, quotes: data.quotes, engine, read: data.read };
   } catch (error) {
     askLog.pop();
     askLog.pop();
@@ -530,6 +553,8 @@ function setupAsk() {
     sendQuestion(input.value);
     input.value = "";
   };
+  document.querySelectorAll("[data-engine]").forEach((button) => { button.onclick = () => setAskEngine(button.dataset.engine); });
+  try { askEngine = localStorage.getItem(ASK_ENGINE_KEY) === "claude" ? "claude" : "local"; } catch { /* по умолчанию локально */ }
   document.getElementById("ask-log").addEventListener("click", (event) => {
     const hint = event.target.closest("[data-hint]");
     if (hint) sendQuestion(hint.dataset.hint);
@@ -540,10 +565,24 @@ function setupAsk() {
   restorePanel();
 }
 
-function setAskReady(model) {
+function setAskReady(model, claude) {
+  localReady = Boolean(model);
+  claudeReady = Boolean(claude);
+  setAskEngine(askEngine);
+}
+
+function setAskEngine(engine) {
+  askEngine = engine;
+  try { localStorage.setItem(ASK_ENGINE_KEY, engine); } catch { /* выбор не запомнится */ }
+  document.querySelectorAll("[data-engine]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.engine === engine)));
+  askPanel.classList.toggle("cloud", engine === "claude");
   const input = document.getElementById("ask-input");
-  input.disabled = !model;
-  input.placeholder = model ? "Спросить о чатах и делах" : "Локальная модель не установлена";
+  const ready = engine === "claude" ? claudeReady : localReady;
+  input.disabled = !ready;
+  input.placeholder = engine === "claude"
+    ? (ready ? "Спросить Claude по открытым чатам и новостям" : "Claude не подключён: claude_login.bat")
+    : (ready ? "Спросить о чатах и делах" : "Локальная модель не установлена");
+  if (!askPanel.hidden) paintAsk();
 }
 
 function newsList() {
@@ -648,7 +687,7 @@ function renderToday(data) {
     activeTopic = event.target.value;
     document.getElementById("news").innerHTML = newsList();
   };
-  setAskReady(data.local_model);
+  setAskReady(data.local_model, data.claude_ready);
   document.getElementById("quick-add").onsubmit = (event) => {
     event.preventDefault();
     addTask(document.getElementById("quick-task"));
@@ -892,11 +931,17 @@ function group(iconName, title, count, body, open = false) {
   return `<details class="group" ${open ? "open" : ""}><summary>${icon(iconName)}${esc(title)}<span class="count">${esc(count)}</span>${icon("chev", "chev")}</summary><div class="group-body">${body}</div></details>`;
 }
 
+function openChatsList(data) {
+  if (!data.public_chats.length) return '<p class="note">Среди выбранных чатов открытых групп пока нет. Добавьте нужные в разделе «Чаты Telegram».</p>';
+  const closed = new Set(draft.privacy.claude_closed_chats || []);
+  return `<div class="open-chats">${data.public_chats.map((name) => `<label class="src-row"><input type="checkbox" data-claude-chat="${esc(name)}" ${closed.has(name) ? "" : "checked"}><span class="grow">${esc(name)}</span></label>`).join("")}</div>`;
+}
+
 function privacyBody(data) {
   const model = data.local_model;
   return `<div class="status-row">${icon("check")}Текст чатов хранится только на этом компьютере</div>
     <div class="status-row">${icon("check")}В сводку Claude попадают только числа</div>
-    <div class="status-row">${icon("check")}Новости и посты каналов может читать Claude, группы и личные чаты нет</div>
+    <div class="status-row">${icon("check")}Claude может читать новости, посты каналов и открытые группы. Закрытые группы и личные чаты нет</div>
     <div class="status-row ${model ? "" : "off"}">${icon(model ? "check" : "shield")}${model ? `Локальная модель: ${esc(model)}` : "Локальная модель не установлена, работают правила"}</div>
     <label class="switch plain"><input type="checkbox" id="claude-enabled" ${draft.claude.enabled ? "checked" : ""}>
       <span>Просить Claude делать саммари, если локальная модель не справилась<small class="soft">Только публичные статьи. Нужен разовый вход: claude_login.bat</small></span></label>
@@ -904,6 +949,10 @@ function privacyBody(data) {
       <span>Добавлять сроки из чатов в «Актуальное»<small class="soft">Раздел «Сроки из чатов». Его могут прочитать сессии Claude, которые открывают хранилище</small></span></label>
     <label class="switch plain"><input type="checkbox" id="auto-promises" ${draft.deadlines.promises !== false ? "checked" : ""}>
       <span>Находить мои обещания в чатах<small class="soft">«Скину завтра» и подобное попадает в дела. Раздел тот же</small></span></label>
+    <label class="switch plain"><input type="checkbox" id="claude-public" ${draft.privacy.claude_public_chats !== false ? "checked" : ""}>
+      <span>Отвечать Claude по открытым группам<small class="soft">Только группы с публичной ссылкой t.me: их читает любой без вступления. Галочкой ниже можно закрыть любую</small></span></label>
+    ${openChatsList(data)}
+    <label class="field">О себе для Claude: навыки, опыт, что ищете<textarea id="claude-profile" placeholder="Например: психолог, 3 курс ВШЭ; пишу тексты, делаю опросы и анализ данных в Python; ищу удалённые заказы до 10 часов в неделю">${esc(draft.claude.profile || "")}</textarea><small class="soft">Уходит в Claude вместе с вопросом. Локальной модели не нужно</small></label>
     <label class="switch"><input type="checkbox" id="claude-chats" ${draft.privacy.claude_reads_chats ? "checked" : ""}>
       <span>Разрешить Claude читать отмеченные чаты<small>Текст будет уходить на серверы Anthropic</small></span></label>`;
 }
@@ -1054,6 +1103,9 @@ function readSimpleFields() {
   draft.me.names = splitList(document.getElementById("names").value);
   draft.blacklist = splitList(document.getElementById("blacklist").value);
   draft.privacy.claude_reads_chats = document.getElementById("claude-chats").checked;
+  draft.privacy.claude_public_chats = document.getElementById("claude-public").checked;
+  draft.privacy.claude_closed_chats = [...view.querySelectorAll("[data-claude-chat]")].filter((box) => !box.checked).map((box) => box.dataset.claudeChat);
+  draft.claude.profile = document.getElementById("claude-profile").value;
   draft.deadlines.auto_add = document.getElementById("auto-deadlines").checked;
   draft.claude.enabled = document.getElementById("claude-enabled").checked;
 }

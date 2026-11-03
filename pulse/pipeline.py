@@ -5,7 +5,7 @@ import threading
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from . import analysis, db, deadlines, feeds, local_ai, notify, obsidian, picks, promises, replies, telegram
+from . import analysis, claude_ai, db, deadlines, feeds, local_ai, notify, obsidian, picks, promises, replies, telegram
 from .agenda import CHAT_SECTION, done_tasks
 from .config import BRIEF_PATH, EXPORT_PATH, load_config, muted_chats
 
@@ -186,7 +186,7 @@ def render_export(view, queued):
     названия чатов сюда не попадают ни при каких настройках, только общие числа.
     """
     today = date.today().isoformat()
-    public = lambda items: [i for i in items if i["source_type"] != "tg_private"]
+    public = lambda items: [i for i in items if claude_ai.is_public(i)]
     own_tasks = [t for t in view["actions"] + view["agenda"] if not from_chat(t)]
     out = [
         f"# Материал для сводки Пульса, {today}", "",

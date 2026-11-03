@@ -9,7 +9,7 @@ import asyncio
 import json
 import sys
 
-from . import analysis, db, pipeline, telegram
+from . import analysis, claude_ai, db, pipeline, telegram
 from .config import load_config
 
 PROTOCOL = "2025-06-18"
@@ -45,7 +45,7 @@ def public_today(view):
     own = lambda tasks: [t for t in tasks if not pipeline.from_chat(t)]
     return {
         "actions": own(view["actions"]), "agenda": own(view["agenda"]), "stats": view["stats"], "tiles": view["tiles"],
-        "main": [i for i in view["main"] if i["source_type"] != "tg_private"],
+        "main": [i for i in view["main"] if claude_ai.is_public(i)],
     }
 
 

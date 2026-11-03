@@ -609,3 +609,13 @@ button:active:not(:disabled), .btn:active, .chip:active { transform: scale(.97);
 .watch-chip .tool { width: 20px; height: 20px; }
 .watch-chip .ico { width: 12px; height: 12px; }
 @media (hover: none) { .pick-tools { opacity: 1; } }
+
+/* Кто отвечает в окне: модель на компьютере или Claude */
+.ask-engine { display: inline-flex; background: var(--surface-2); border-radius: 8px; padding: 2px; gap: 2px; }
+.ask-engine button { border: 0; background: none; font-size: 12.5px; padding: 3px 9px; border-radius: 6px; color: var(--muted); cursor: pointer; }
+.ask-engine button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+.ask-panel.cloud .ask-engine button[aria-pressed="true"] { color: var(--accent); }
+.ask-panel.cloud .ask-head { background: linear-gradient(var(--accent-soft), transparent); }
+.bubble-engine { color: var(--accent); font-size: 11.5px; margin-bottom: 3px; }
+.typing-note { color: var(--muted); font-size: 12px; margin-left: 8px; }
+.open-chats { max-height: 180px; overflow-y: auto; margin: 2px 0 10px 28px; }

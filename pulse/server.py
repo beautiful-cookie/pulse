@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import agenda, analysis, assistant, autostart, claude_ai, db, deadlines, digest, interests, learning, local_ai, picks, pipeline, remote, summaries, telegram
+from . import agenda, analysis, assistant, autostart, claude_ai, claude_ask, db, deadlines, digest, interests, learning, local_ai, picks, pipeline, remote, summaries, telegram
 from .config import LEVELS, load_config, save_config
 
 _agenda_lock = threading.Lock()
@@ -87,9 +87,10 @@ def settings_payload():
     with db.connect() as conn:
         learned = learning.view(conn, cfg)
         known = interests.known_names(conn, cfg)
+        open_chats = claude_ask.public_chats(conn, cfg)
     return {"config": {k: cfg[k] for k in SETTINGS_KEYS}, "local_model": local_ai.cached_model(cfg), "telegram": {
         "connected": telegram.is_connected(), "dialogs": telegram.load_dialogs()},
-        "learned": learned, "autostart": autostart.is_enabled(), "known_names": known}
+        "learned": learned, "autostart": autostart.is_enabled(), "known_names": known, "public_chats": open_chats}
 
 
 def validate_settings(body):
@@ -110,6 +111,10 @@ def validate_settings(body):
         prefs = clean["interests"]
         clean["interests"] = {"about": [str(a).strip()[:200] for a in prefs.get("about", []) if str(a).strip()][:40],
                               "watch": [str(w).strip()[:120] for w in prefs.get("watch", []) if str(w).strip()][:60]}
+    if "claude" in clean:
+        clean["claude"]["profile"] = str(clean["claude"].get("profile", ""))[:claude_ask.PROFILE_CHARS]
+    if "privacy" in clean:
+        clean["privacy"]["claude_closed_chats"] = [str(n) for n in clean["privacy"].get("claude_closed_chats", [])][:300]
     if "full_collect_hour" in clean:
         clean["full_collect_hour"] = max(0, min(23, int(clean["full_collect_hour"])))
     return clean
@@ -267,6 +272,8 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/tasks":
                 with db.connect() as conn:
                     return self._json(analysis.tasks_view(conn, load_config()))
+            if url.path == "/api/ask-claude":
+                return self._json(claude_ask.status((query.get("id") or [""])[0]))
             if url.path == "/api/news-digest":
                 return self._json(digest.status())
             if url.path == "/api/remote":
@@ -337,6 +344,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(toggle_remote(body))
             if path == "/api/news-digest":
                 return self._json(digest.start())
+            if path == "/api/ask-claude":
+                return self._json(claude_ask.start(load_config(), body.get("question"), body.get("history") or []))
             if path == "/api/ask":
                 return self._json(assistant.answer(load_config(), body.get("question"), body.get("history") or []))
             if path == "/api/tasks":

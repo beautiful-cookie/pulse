@@ -28,7 +28,10 @@
   <section id="ask-panel" class="ask-panel" aria-label="Вопросы локальной модели" hidden>
     <header id="ask-head" class="ask-head" title="Перетащите, чтобы подвинуть">
       <span class="ask-title">Спросить</span>
-      <span class="private" data-icon="shield" title="Вопрос и ответ не покидают компьютер и нигде не хранятся">локально</span>
+      <div class="ask-engine" role="group" aria-label="Кто отвечает">
+        <button type="button" data-engine="local" aria-pressed="true" title="Модель на этом компьютере. Вопрос и ответ никуда не уходят">Локально</button>
+        <button type="button" data-engine="claude" aria-pressed="false" title="Claude в облаке. Видит только открытые группы, посты каналов и новости">Claude</button>
+      </div>
       <button id="ask-clear" class="ask-link" type="button">Очистить</button>
       <button id="ask-close" class="tool" type="button" aria-label="Закрыть" data-icon="close"></button>
     </header>

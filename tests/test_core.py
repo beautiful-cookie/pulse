@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pulse import agenda, analysis, assistant, autostart, claude_ai, db, deadlines, digest, feeds, interests, learning, local_ai, mcp_server, notify, obsidian, picks, pipeline, promises, remote, replies, summaries, telegram
+from pulse import agenda, analysis, assistant, autostart, claude_ai, claude_ask, db, deadlines, digest, feeds, interests, learning, local_ai, mcp_server, notify, obsidian, picks, pipeline, promises, remote, replies, summaries, telegram
 from pulse.config import DEFAULT_CONFIG, active_mode
 from pulse.text import extract_due, keyword_regex, stem
 
@@ -388,7 +388,7 @@ class Privacy(unittest.TestCase):
     def view(self):
         message = {"id": 1, "title": self.SECRET, "body": self.SECRET, "source_name": "Секретный чат", "topics": [],
                    "links": [], "url": "https://t.me/c/1/1", "source_type": "tg_private", "author": "Секретный автор"}
-        news = {"id": 2, "title": "Публичная новость", "body": "", "source_name": "N+1", "topics": [], "links": [],
+        news = {"id": 2, "kind": "news", "title": "Публичная новость", "body": "", "source_name": "N+1", "topics": [], "links": [],
                 "url": "https://x/1", "source_type": "rss", "author": ""}
         return {"actions": [], "agenda": [], "main": [message, news], "rest": [{"name": "t", "items": [message]}],
                 "stats": {}, "tiles": {"reply": 2, "chat_due": 1},
@@ -2003,6 +2003,85 @@ class AskConversation(unittest.TestCase):
     def test_channel_author_is_not_repeated_in_quote(self):
         row = self.conn.execute("SELECT * FROM items WHERE uid='tgp-x-0'").fetchone()
         self.assertEqual(assistant.quote(row)["author"], "")
+
+
+class ClaudeOnPublicChats(unittest.TestCase):
+    def setUp(self):
+        self.conn = memory_db()
+        self.add("tg--100-1", "Фриланс: тексты", "Заказчик", "Нужен автор статей по психологии, 5 текстов, оплата за знак", "https://t.me/freelance_texts/1", "группа")
+        self.add("tg--200-1", "Закрытая группа", "Олег", "Секрет группы", "https://t.me/c/200/1", "группа")
+        self.add("tg--300-1", "Без ссылки", "Анна", "Секрет обычной группы", "", "группа")
+        self.add("tg-7-1", "Вера Смирнова", "Вера", "Личный секрет", "https://t.me/vera_s/1", "личный")
+        db.upsert_item(self.conn, {"uid": "n1", "kind": "news", "source_type": "rss", "source_name": "N+1", "title": "Новость о мозге",
+                                   "body": "Учёные описали новый механизм памяти", "url": "https://nplus1.ru/x", "published": db.now_iso()})
+        self.cfg = {"claude": {"enabled": True, "model": "haiku", "profile": "Психолог, пишу тексты"}, "privacy": {},
+                    "interests": {"about": ["философия сознания"], "watch": []}}
+
+    def add(self, uid, source, author, body, url, kind):
+        db.upsert_item(self.conn, {"uid": uid, "kind": "message", "source_type": "tg_private", "source_name": source, "title": body[:40],
+                                   "body": body, "author": author, "url": url, "published": db.now_iso(), "meta": {"chat_id": 1, "chat_kind": kind}})
+
+    def test_only_open_groups_and_public_material(self):
+        prompt, refs = claude_ask.build_prompt(self.conn, self.cfg, "Найди заказы под мой профиль")
+        self.assertIn("Нужен автор статей", prompt)
+        self.assertIn("Новый механизм памяти".lower(), prompt.lower())
+        for secret in ("Секрет группы", "Секрет обычной группы", "Личный секрет"):
+            self.assertNotIn(secret, prompt)
+        self.assertEqual({r["uid"] for r in refs}, {"tg--100-1", "n1"})
+
+    def test_profile_and_numbering_reach_claude(self):
+        prompt, _ = claude_ask.build_prompt(self.conn, self.cfg, "Найди заказы")
+        self.assertIn("О Максиме, его словами:\nПсихолог, пишу тексты", prompt)
+        self.assertIn("Его интересы: философия сознания", prompt)
+        self.assertIn("### Фриланс: тексты\n[1] Заказчик,", prompt)
+
+    def test_closed_by_you_or_switched_off(self):
+        self.cfg["privacy"] = {"claude_closed_chats": ["Фриланс: тексты"]}
+        self.assertNotIn("Нужен автор статей", claude_ask.build_prompt(self.conn, self.cfg, "Найди заказы")[0])
+        self.cfg["privacy"] = {"claude_public_chats": False}
+        self.assertNotIn("Нужен автор статей", claude_ask.build_prompt(self.conn, self.cfg, "Найди заказы")[0])
+
+    def test_named_source_goes_first_but_nothing_is_dropped(self):
+        db.upsert_item(self.conn, {"uid": "tgp-psy-1", "kind": "post", "source_type": "tg_public", "source_name": "Психология сегодня", "title": "т",
+                                   "body": "Пост", "url": "https://t.me/psy_today/1", "published": db.now_iso()})
+        rows = claude_ask.select(claude_ask.shareable(self.conn, self.cfg, "2000"), "Что пишут в канале Психология сегодня?", [])
+        self.assertEqual([r["uid"] for r in rows], ["tgp-psy-1", "tg--100-1", "n1"])
+
+    def test_closed_channel_posts_never_reach_claude(self):
+        db.upsert_item(self.conn, {"uid": "tg--500-1", "kind": "post", "source_type": "tg_public", "source_name": "Закрытый канал", "title": "т",
+                                   "body": "Секрет канала", "url": "https://t.me/c/500/1", "published": db.now_iso()})
+        item = db.row_to_item(self.conn.execute("SELECT * FROM items WHERE uid='tg--500-1'").fetchone())
+        self.assertFalse(claude_ai.is_public(item))
+        self.assertNotIn("Секрет канала", claude_ask.build_prompt(self.conn, self.cfg, "Что нового?")[0])
+        self.assertNotIn("Секрет канала", pipeline.render_export({"actions": [], "agenda": [], "main": [item], "rest": [], "tiles": {"reply": 0, "chat_due": 0}}, []))
+        self.assertTrue(claude_ai.is_public({**item, "url": "https://t.me/open_channel/1"}))
+
+    def test_answer_with_quotes_from_the_database(self):
+        reply = "ОТВЕТ: Подходит заказ на статьи по психологии [1].\nИСТОЧНИКИ: 1"
+        with patch.object(db, "connect", lambda: nullcontext(self.conn)), patch.object(claude_ai, "run", lambda *a, **k: reply):
+            result = claude_ask.ask(self.cfg, "Найди заказы")
+        self.assertEqual(result["answer"], "Подходит заказ на статьи по психологии.")
+        self.assertEqual(result["quotes"][0]["link"], "https://t.me/freelance_texts/1")
+
+    def test_job_runs_in_background(self):
+        with patch.object(claude_ask, "ask", lambda cfg, q, h: {"answer": "Готово", "quotes": [], "read": 2}):
+            job = claude_ask.start(self.cfg, "Найди заказы")
+            for _ in range(50):
+                state = claude_ask.status(job["id"])
+                if state["status"] != "working":
+                    break
+                threading.Event().wait(0.02)
+        self.assertEqual((state["status"], state["answer"]), ("done", "Готово"))
+
+    def test_disabled_claude_is_refused(self):
+        with self.assertRaises(ValueError):
+            claude_ask.start({"claude": {"enabled": False}}, "Найди заказы")
+
+    def test_personal_chat_with_username_is_not_public(self):
+        item = {"kind": "message", "source_type": "tg_private", "url": "https://t.me/vera_s/1", "meta": {"chat_kind": "личный"}}
+        self.assertFalse(claude_ai.is_public_chat(item))
+        self.assertTrue(claude_ai.is_public_chat({**item, "meta": {"chat_kind": "группа"}}))
+        self.assertFalse(claude_ai.is_public_chat({**item, "url": "https://t.me/c/5/1", "meta": {"chat_kind": "группа"}}))
 
 
 class ArticleSummaries(unittest.TestCase):

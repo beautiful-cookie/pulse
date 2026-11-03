@@ -24,7 +24,7 @@ ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 SETTINGS_KEYS = {"topics", "feeds", "tg_public", "tg_private", "blacklist", "budget_main",
                  "topic_cap", "chat_interval_min", "news_interval_min", "model_interval_min", "full_collect_hour",
                  "notify", "interests", "me", "privacy", "deadlines", "claude", "modes"}
-LOOPBACK_ONLY = {"/api/settings", "/api/remote", "/api/shutdown", "/api/autostart", "/api/learned"}  # с телефона это менять нельзя
+LOOPBACK_ONLY = {"/api/settings", "/api/remote", "/api/shutdown", "/api/autostart", "/api/learned", "/api/tg-dialogs"}  # с телефона это менять нельзя
 PAGE = 40
 MAX_BODY_BYTES = 2_000_000
 
@@ -89,7 +89,7 @@ def settings_payload():
         known = interests.known_names(conn, cfg)
         open_chats = claude_ask.public_chats(conn, cfg)
     return {"config": {k: cfg[k] for k in SETTINGS_KEYS}, "local_model": local_ai.cached_model(cfg), "telegram": {
-        "connected": telegram.is_connected(), "dialogs": telegram.load_dialogs()},
+        "connected": telegram.is_connected(), "dialogs": telegram.load_dialogs(), "folders": telegram.load_folders()},
         "learned": learned, "autostart": autostart.is_enabled(), "known_names": known, "public_chats": open_chats}
 
 
@@ -365,6 +365,8 @@ class Handler(BaseHTTPRequestHandler):
                 with db.connect() as conn:
                     picks.rate(conn, str(body.get("uid")), body.get("feedback"))
                 return self._json({"ok": True})
+            if path == "/api/tg-dialogs":
+                return self._json(telegram.refresh_dialogs())
             if path == "/api/autostart":
                 return self._json({"enabled": autostart.set_enabled(bool(body.get("enabled")))})
             if path == "/api/learned":

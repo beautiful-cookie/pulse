@@ -928,7 +928,7 @@ async function renderSettings() {
 }
 
 function group(iconName, title, count, body, open = false) {
-  return `<details class="group" ${open ? "open" : ""}><summary>${icon(iconName)}${esc(title)}<span class="count">${esc(count)}</span>${icon("chev", "chev")}</summary><div class="group-body">${body}</div></details>`;
+  return `<details class="group" data-key="${esc(title)}" ${open ? "open" : ""}><summary>${icon(iconName)}${esc(title)}<span class="count">${esc(count)}</span>${icon("chev", "chev")}</summary><div class="group-body">${body}</div></details>`;
 }
 
 function openChatsList(data) {
@@ -957,15 +957,36 @@ function privacyBody(data) {
       <span>Разрешить Claude читать отмеченные чаты<small>Текст будет уходить на серверы Anthropic</small></span></label>`;
 }
 
+let chatGroups = [];
+
 function telegramBody(tg) {
   if (!tg.connected) return '<p class="note">Запустите <code>telegram_login.bat</code>. Подключение только читает и не помечает сообщения прочитанными.</p>';
   const chosen = new Set(draft.tg_private.map((c) => c.id));
   const levelOf = (id) => draft.tg_private.find((c) => c.id === id)?.level || "обычно";
-  const rows = tg.dialogs.filter((d) => !d.archived).slice(0, 300).map((d) => `<label class="src-row" data-chat-name="${esc(d.name.toLowerCase())}">
+  const row = (d) => `<label class="src-row" data-chat-name="${esc(d.name.toLowerCase())}">
       <input type="checkbox" data-chat="${d.id}" ${chosen.has(d.id) ? "checked" : ""}>
-      <span class="grow">${esc(d.name)} <small>${esc(d.kind)}</small></span>
-      ${chosen.has(d.id) ? `<select class="level" data-draft-level="${d.id}" aria-label="Важность">${LEVELS.map((l) => `<option ${l === levelOf(d.id) ? "selected" : ""}>${l}</option>`).join("")}</select>` : ""}</label>`).join("");
-  return `<input id="chat-filter" class="grow-input" style="width:100%" placeholder="Найти чат" aria-label="Найти чат"><div class="chatlist">${rows}</div>`;
+      <span class="grow">${esc(d.name)} <small>${esc(d.kind)}${d.archived ? " · архив" : ""}</small></span>
+      ${chosen.has(d.id) ? `<select class="level" data-draft-level="${d.id}" aria-label="Важность">${LEVELS.map((l) => `<option ${l === levelOf(d.id) ? "selected" : ""}>${l}</option>`).join("")}</select>` : ""}</label>`;
+  // Как в Telegram: папки по порядку, чат из нескольких папок виден в каждой
+  chatGroups = (tg.folders || []).map((title) => ({ title, items: tg.dialogs.filter((d) => (d.folders || []).includes(title)) }));
+  chatGroups.push({ title: tg.folders?.length ? "Без папки" : "Все чаты", items: tg.dialogs.filter((d) => !(d.folders || []).length) });
+  const groups = chatGroups.map((g, i) => (g.items.length ? `<details class="folder" data-key="папка:${esc(g.title)}" ${chatGroups.length === 1 ? "open" : ""}>
+      <summary>${esc(g.title)}<span class="count">${g.items.filter((d) => chosen.has(d.id)).length} из ${g.items.length}</span>${icon("chev", "chev")}</summary>
+      <div class="folder-tools"><button type="button" class="linkish" data-folder-all="${i}">Выбрать все</button><button type="button" class="linkish" data-folder-none="${i}">Снять все</button></div>
+      <div class="chatlist">${g.items.map(row).join("")}</div></details>` : "")).join("");
+  return `<div class="tg-tools"><input id="chat-filter" class="grow-input" placeholder="Найти чат" aria-label="Найти чат">
+      <button class="btn" id="tg-refresh" type="button">Обновить список</button></div>
+    <p class="note">Всего чатов: ${tg.dialogs.length}, папок: ${(tg.folders || []).length}. Архивные тоже здесь. Выбор сохраняется кнопкой «Сохранить» внизу.</p>
+    ${groups}`;
+}
+
+function setChat(tg, id, on) {
+  draft.tg_private = draft.tg_private.filter((c) => c.id !== id);
+  if (on) {
+    const dialog = tg.dialogs.find((d) => d.id === id);
+    draft.tg_private.push({ id, name: dialog.name, kind: dialog.kind, level: "обычно" });
+  }
+  view.querySelectorAll(`[data-chat="${id}"]`).forEach((box) => { box.checked = on; });
 }
 
 function modesBody() {
@@ -1049,6 +1070,9 @@ async function paintRemote() {
 
 function paintSettings(data) {
   settingsData = data;
+  // Перерисовка после «Выбрать все» не должна сворачивать то, что вы открыли
+  const opened = [...view.querySelectorAll("details[data-key]")].map((d) => [d.dataset.key, d.open]);
+  const scroll = scrollY;
   const topics = draft.topics.map((t, i) => `<details class="topic-row">
       <summary><span class="dot" style="--dot:${topicColor(t.id)}"></span>${esc(t.name)}<small>вес ${t.weight}</small></summary>
       <div class="two">
@@ -1085,6 +1109,11 @@ function paintSettings(data) {
       <label class="field">Как вас называют в чатах<input id="names" value="${esc(draft.me.names.join(", "))}"></label>
       <label class="field">Чёрный список<textarea id="blacklist">${esc(draft.blacklist.join(", "))}</textarea></label>`)}
     <div class="save-bar"><button class="btn primary" id="save">Сохранить</button></div>`;
+  for (const [key, open] of opened) {
+    const details = [...view.querySelectorAll("details[data-key]")].find((d) => d.dataset.key === key);
+    if (details) details.open = open;
+  }
+  if (opened.length) scrollTo(0, scroll);
   bindSettings(data);
   paintRemote().catch(() => {});
 }
@@ -1142,15 +1171,29 @@ function bindSettings(data) {
   view.querySelectorAll("[data-remove-channel]").forEach((el) => { el.onclick = () => { draft.tg_public.splice(Number(el.dataset.removeChannel), 1); repaint(); }; });
   view.querySelectorAll("[data-feed-on]").forEach((el) => { el.onchange = () => { draft.feeds[Number(el.dataset.feedOn)].enabled = el.checked; }; });
   view.querySelectorAll("[data-chat]").forEach((el) => {
-    el.onchange = () => {
-      const id = Number(el.dataset.chat);
-      draft.tg_private = draft.tg_private.filter((c) => c.id !== id);
-      if (el.checked) {
-        const dialog = tg.dialogs.find((d) => d.id === id);
-        draft.tg_private.push({ id, name: dialog.name, kind: dialog.kind, level: "обычно" });
-      }
-    };
+    el.onchange = () => setChat(tg, Number(el.dataset.chat), el.checked);
   });
+  const folderPick = (index, on) => {
+    chatGroups[index].items.forEach((d) => setChat(tg, d.id, on));
+    readSimpleFields();
+    paintSettings(data);
+    toast(on ? `Выбрано: ${chatGroups[index].items.length}. Нажмите «Сохранить»` : "Снято. Нажмите «Сохранить»");
+  };
+  view.querySelectorAll("[data-folder-all]").forEach((el) => { el.onclick = () => folderPick(Number(el.dataset.folderAll), true); });
+  view.querySelectorAll("[data-folder-none]").forEach((el) => { el.onclick = () => folderPick(Number(el.dataset.folderNone), false); });
+  const refreshChats = document.getElementById("tg-refresh");
+  if (refreshChats) refreshChats.onclick = async () => {
+    refreshChats.disabled = true;
+    refreshChats.textContent = "Обновляю…";
+    try {
+      const state = await api("/api/tg-dialogs", {});
+      readSimpleFields();
+      const fresh = await api("/api/settings");
+      data.telegram = fresh.telegram;
+      paintSettings(data);
+      toast(`Чатов: ${state.dialogs}, папок: ${state.folders}`);
+    } catch (error) { toast(error.message); refreshChats.disabled = false; refreshChats.textContent = "Обновить список"; }
+  };
   document.getElementById("watch-add-btn").onclick = () => {
     const name = document.getElementById("watch-add").value.trim();
     if (!name) return;
@@ -1176,6 +1219,11 @@ function bindSettings(data) {
   if (chatFilter) chatFilter.oninput = () => {
     const query = chatFilter.value.toLowerCase();
     view.querySelectorAll("[data-chat-name]").forEach((row) => { row.style.display = row.dataset.chatName.includes(query) ? "" : "none"; });
+    view.querySelectorAll("details.folder").forEach((folder) => {
+      const shown = [...folder.querySelectorAll("[data-chat-name]")].some((row) => row.style.display !== "none");
+      folder.style.display = shown ? "" : "none";
+      folder.open = Boolean(query) && shown;
+    });
   };
   document.getElementById("add-channel-btn").onclick = () => {
     const name = document.getElementById("add-channel").value.trim().replace(/^@|^https?:\/\/t\.me\/(s\/)?/g, "");

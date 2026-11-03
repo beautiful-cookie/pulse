@@ -15,6 +15,7 @@ EXPORT_PATH = DATA / "for_claude.md"
 TG_CREDS_PATH = DATA / "telegram.json"
 TG_SESSION_PATH = DATA / "telegram"
 TG_DIALOGS_PATH = DATA / "tg_dialogs.json"
+TG_FOLDERS_PATH = DATA / "tg_folders.json"
 TG_QR_PAGE_PATH = DATA / "telegram_qr.html"
 
 _lock = threading.Lock()

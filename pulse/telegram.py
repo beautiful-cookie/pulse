@@ -11,7 +11,7 @@ import webbrowser
 from datetime import datetime, timedelta, timezone
 
 from . import db
-from .config import DATA, TG_CREDS_PATH, TG_DIALOGS_PATH, TG_QR_PAGE_PATH, TG_SESSION_PATH
+from .config import DATA, TG_CREDS_PATH, TG_DIALOGS_PATH, TG_FOLDERS_PATH, TG_QR_PAGE_PATH, TG_SESSION_PATH
 from .promises import is_promise
 from .text import first_line_title
 
@@ -258,23 +258,87 @@ async def read_tops(client, limit):
     return tops
 
 
+FOLDER_RULES = ("contacts", "non_contacts", "groups", "broadcasts", "bots", "exclude_archived")
+
+
+async def read_folders(client):
+    """Папки Telegram: название, явный состав и правила вроде «все группы». Только чтение."""
+    from telethon import functions, utils
+    result = await client(functions.messages.GetDialogFiltersRequest())
+    folders = []
+    for item in getattr(result, "filters", result):
+        if not hasattr(item, "include_peers"):
+            continue  # «Все чаты»: у неё нет состава
+        title = getattr(item.title, "text", item.title)  # в новых версиях название приходит с разметкой
+        peers = list(item.include_peers) + list(getattr(item, "pinned_peers", []))
+        folders.append({"title": str(title), "include": {utils.get_peer_id(p) for p in peers},
+                        "exclude": {utils.get_peer_id(p) for p in getattr(item, "exclude_peers", [])},
+                        "rules": {rule for rule in FOLDER_RULES if getattr(item, rule, False)}})
+    return folders
+
+
+def in_folder(folder, dialog):
+    """Чат в папке, если указан в ней явно или подходит под её правила, как в самом Telegram."""
+    if dialog["id"] in folder["exclude"]:
+        return False
+    if dialog["id"] in folder["include"]:
+        return True
+    rules = folder["rules"]
+    if "exclude_archived" in rules and dialog["archived"]:
+        return False
+    kind = dialog["kind"]
+    if kind == "личный":
+        return ("contacts" in rules and dialog["contact"]) or ("non_contacts" in rules and not dialog["contact"])
+    return {"группа": "groups", "канал": "broadcasts", "бот": "bots"}[kind] in rules
+
+
 async def save_dialogs(client):
+    """Все диалоги, включая архив, и папки, в которых они лежат."""
     dialogs = []
     tops = {}
-    async for dialog in client.iter_dialogs(limit=500):
+    async for dialog in client.iter_dialogs():
         tops[str(dialog.id)] = dialog.message.id if dialog.message else 0
         dialogs.append({
             "id": dialog.id, "name": dialog.name or "Без названия", "kind": chat_kind(dialog),
             "unread": dialog.unread_count,
             "last": dialog.date.isoformat() if dialog.date else None,
-            "archived": bool(dialog.archived),
+            "archived": bool(dialog.archived), "contact": bool(getattr(dialog.entity, "contact", False)),
         })
+    try:
+        folders = await read_folders(client)
+    except Exception:  # без папок список всё равно нужен
+        folders = []
+    for dialog in dialogs:
+        dialog["folders"] = [f["title"] for f in folders if in_folder(f, dialog)]
     TG_DIALOGS_PATH.write_text(json.dumps(dialogs, ensure_ascii=False), "utf-8")
+    TG_FOLDERS_PATH.write_text(json.dumps([f["title"] for f in folders], ensure_ascii=False), "utf-8")
     return tops
+
+
+async def refresh_dialogs_async(client):
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            raise RuntimeError("сессия недействительна, нужен повторный вход")
+        await save_dialogs(client)
+    finally:
+        await client.disconnect()
+
+
+def refresh_dialogs():
+    """Кнопка «Обновить список» в настройках: не ждать ночного полного обновления."""
+    if not is_connected():
+        raise ValueError("Telegram не подключён")
+    asyncio.run(refresh_dialogs_async(make_client()))
+    return {"dialogs": len(load_dialogs()), "folders": len(load_folders())}
 
 
 def load_dialogs():
     return json.loads(TG_DIALOGS_PATH.read_text("utf-8")) if TG_DIALOGS_PATH.exists() else []
+
+
+def load_folders():
+    return json.loads(TG_FOLDERS_PATH.read_text("utf-8")) if TG_FOLDERS_PATH.exists() else []
 
 
 def message_url(chat_id, entity, message_id):

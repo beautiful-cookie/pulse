@@ -34,7 +34,9 @@ DIGESTS = {
     "Хакатон: команда": ("Распределяют роли перед защитой кейса.", "Решить, кто делает презентацию"),
     "Общежитие, этаж 4": ("Бытовые вопросы, вам ничего не нужно делать.", ""),
 }
-DIALOGS = [{"id": c[2], "name": c[0], "kind": c[1], "unread": c[7], "last": None, "archived": False} for c in CHATS]
+FOLDERS = {"Учёба": {-1001, -1005}, "Проекты": {-1002, -1004}}
+DIALOGS = [{"id": c[2], "name": c[0], "kind": c[1], "unread": c[7], "last": None, "archived": c[2] == -1006, "contact": False,
+            "folders": [name for name, ids in FOLDERS.items() if c[2] in ids]} for c in CHATS]
 
 
 def without_chat_section(text):
@@ -122,6 +124,7 @@ def build():
     config["remote"] = {"enabled": False, "key": ""}
     (DEMO / "config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2), "utf-8")
     (data / "tg_dialogs.json").write_text(json.dumps(DIALOGS, ensure_ascii=False), "utf-8")
+    (data / "tg_folders.json").write_text(json.dumps(list(FOLDERS), ensure_ascii=False), "utf-8")
     (data / "telegram.json").write_text('{"api_id": 1, "api_hash": "demo"}', "utf-8")
     (data / "telegram.session").write_text("", "utf-8")
     if (ROOT / "data" / "brief.json").exists():

@@ -1626,14 +1626,15 @@ class QuickCollect(unittest.TestCase):
 
     def test_full_reads_every_chat_from_the_window_start(self):
         client = self.client({1: 100})
-        with patch.object(telegram, "TG_DIALOGS_PATH", SimpleNamespace(write_text=lambda *a: None)), \
+        nowhere = SimpleNamespace(write_text=lambda *a: None)  # настоящие файлы Пульса тест трогать не должен
+        with patch.object(telegram, "TG_DIALOGS_PATH", nowhere), patch.object(telegram, "TG_FOLDERS_PATH", nowhere), \
                 patch.object(telegram, "chat_kind", lambda d: "личный"):
-            client.iter_dialogs = lambda limit: self._dialogs()
+            client.iter_dialogs = lambda limit=None: self._dialogs()
             asyncio.run(telegram.collect_async(client, [{"id": 1, "name": "А", "kind": "личный"}], {"1": 100}, {"1"}, full=True))
         self.assertEqual(client.fetched, [1])
 
     async def _dialogs(self):
-        yield SimpleNamespace(id=1, name="А", message=SimpleNamespace(id=100), unread_count=0, date=None, archived=False)
+        yield SimpleNamespace(id=1, name="А", message=SimpleNamespace(id=100), unread_count=0, date=None, archived=False, entity=SimpleNamespace())
 
     def test_quiet_chat_gets_a_cursor(self):
         old = datetime.now(timezone.utc) - timedelta(days=30)
@@ -2082,6 +2083,50 @@ class ClaudeOnPublicChats(unittest.TestCase):
         self.assertFalse(claude_ai.is_public_chat(item))
         self.assertTrue(claude_ai.is_public_chat({**item, "meta": {"chat_kind": "группа"}}))
         self.assertFalse(claude_ai.is_public_chat({**item, "url": "https://t.me/c/5/1", "meta": {"chat_kind": "группа"}}))
+
+
+class Folders(unittest.TestCase):
+    def folder(self, include=(), exclude=(), rules=()):
+        return {"title": "П", "include": set(include), "exclude": set(exclude), "rules": set(rules)}
+
+    def dialog(self, id_, kind="группа", archived=False, contact=False):
+        return {"id": id_, "kind": kind, "archived": archived, "contact": contact}
+
+    def test_explicit_and_excluded(self):
+        folder = self.folder(include={1, 2}, exclude={2})
+        self.assertTrue(telegram.in_folder(folder, self.dialog(1, archived=True)), "чаты папки по ссылке часто лежат в архиве")
+        self.assertFalse(telegram.in_folder(folder, self.dialog(2)))
+        self.assertFalse(telegram.in_folder(folder, self.dialog(3)))
+
+    def test_rules_like_in_telegram(self):
+        groups = self.folder(rules={"groups", "exclude_archived"})
+        self.assertTrue(telegram.in_folder(groups, self.dialog(5)))
+        self.assertFalse(telegram.in_folder(groups, self.dialog(6, archived=True)))
+        self.assertFalse(telegram.in_folder(groups, self.dialog(7, kind="канал")))
+        people = self.folder(rules={"contacts"})
+        self.assertTrue(telegram.in_folder(people, self.dialog(8, kind="личный", contact=True)))
+        self.assertFalse(telegram.in_folder(people, self.dialog(9, kind="личный")))
+
+    def test_all_dialogs_and_folders_are_saved(self):
+        class Client:
+            def iter_dialogs(self, limit=None):
+                async def run():
+                    for n in range(3):
+                        yield SimpleNamespace(id=n, name=f"Чат {n}", is_user=False, is_channel=False, is_group=True, entity=SimpleNamespace(),
+                                              unread_count=0, date=None, archived=n == 2, message=SimpleNamespace(id=10 + n))
+                return run()
+
+        async def folders(client):
+            return [{"title": "Фриланс", "include": {2}, "exclude": set(), "rules": set()}]
+        with TemporaryDirectory() as folder:
+            dialogs_path, folders_path = Path(folder) / "d.json", Path(folder) / "f.json"
+            with patch.object(telegram, "TG_DIALOGS_PATH", dialogs_path), patch.object(telegram, "TG_FOLDERS_PATH", folders_path), \
+                    patch.object(telegram, "read_folders", folders):
+                tops = asyncio.run(telegram.save_dialogs(Client()))
+                saved = telegram.load_dialogs()
+                self.assertEqual(telegram.load_folders(), ["Фриланс"])
+        self.assertEqual(tops, {"0": 10, "1": 11, "2": 12})
+        self.assertEqual([(d["id"], d["archived"], d["folders"]) for d in saved], [(0, False, []), (1, False, []), (2, True, ["Фриланс"])])
 
 
 class ArticleSummaries(unittest.TestCase):

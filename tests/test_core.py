@@ -1203,25 +1203,41 @@ class Assistant(unittest.TestCase):
         context, _ = assistant.build_context(self.conn, "Что важного в чатах?", cfg)
         self.assertIn("Позвони вечером", context)
 
-    def test_chat_summary_comes_from_digests_without_model(self):
-        for question in ("Сделай саммари по чатам", "Что важного в чатах?", "итоги по чатам"):
-            self.assertTrue(assistant.CHATS_QUESTION.search(question), question)
+    def test_chat_summary_is_built_from_digests(self):
         cfg = {"tg_private": [], "modes": DEFAULT_CONFIG["modes"], "active_mode": "all"}
-        self.assertEqual(assistant.chats_answer(self.conn, cfg)["answer"], "В чатах сейчас нет незакрытых дел.")
         self.conn.execute("INSERT INTO chat_digests VALUES ('Поток','Обсуждают эссе','Сдать эссе','tg-1-1','y')")
-        self.assertIn("Поток: Сдать эссе", assistant.chats_answer(self.conn, cfg)["answer"])
-        db.kv_set(self.conn, "tg_my_last", {"None": 5})
+        context, _ = assistant.build_context(self.conn, "Сделай саммари по чатам", cfg)
+        self.assertIn("Чат «Поток»; суть: Обсуждают эссе; дело: Сдать эссе", context)
 
-    def test_most_important_task_is_answered_from_the_list(self):
-        for question in ("Какое дело сейчас самое важное?", "Что сделать первым?", "С чего начать?", "какие задачи срочные"):
-            self.assertTrue(assistant.TASKS_QUESTION.search(question), question)
+    def test_rest_mode_does_not_hide_chats_from_questions(self):
+        db.upsert_item(self.conn, {"uid": "tg-5-9", "kind": "message", "source_type": "tg_private", "source_name": "Мама",
+                                   "title": "Позвони вечером", "body": "Позвони вечером", "published": db.now_iso(),
+                                   "meta": {"chat_id": 5, "chat_kind": "личный"}})
+        cfg = {"tg_private": [], "modes": DEFAULT_CONFIG["modes"], "active_mode": "rest"}
+        context, _ = assistant.build_context(self.conn, "Сделай саммари по чатам", cfg)
+        self.assertIn("Чат «Мама»; ждёт ответа: Позвони вечером", context)
+        self.assertIn("Мама", assistant.waiting_answer(cfg, self.conn)["answer"])
+
+    def test_watched_posts_answer_questions_about_interests(self):
+        db.upsert_item(self.conn, {"uid": "tgp-i-1", "kind": "post", "source_type": "tg_public", "source_name": ".intuition-", "title": "т",
+                                   "body": "Готовлю сценарий о научном сектантстве", "author": ".intuition-", "published": db.now_iso()})
+        cfg = {**DEFAULT_CONFIG, "tg_private": [], "interests": {"about": [], "watch": [".intuition-"]}}
+        context, _, refs = assistant.gather(self.conn, "Составь сводку по моим интересам", cfg)
+        self.assertIn("научном сектантстве", context)
+        self.assertEqual(refs[0]["uid"], "tgp-i-1")
+        _, _, refs = assistant.gather(self.conn, "Сделай саммари по чатам", cfg)
+        self.assertEqual(refs, [], "к сводке чатов посты не относятся")
+
+    def test_tasks_and_profile_reach_the_model(self):
         soon = (date.today() + timedelta(days=1)).isoformat()
-        db.upsert_item(self.conn, {"uid": "t1", "kind": "task", "source_type": "obsidian", "source_name": "Актуальное", "title": "Сдать эссе",
+        db.upsert_item(self.conn, {"uid": "t1", "kind": "task", "source_type": "obsidian", "source_name": "Актуальное", "title": "Сдать эссе (до 05.11)",
                                    "published": db.now_iso(), "due": soon, "meta": {"agenda": True}})
         self.conn.execute("UPDATE items SET tier='high', score=80 WHERE uid='t1'")
-        cfg = {**DEFAULT_CONFIG, "tg_private": []}
-        answer = assistant.tasks_answer(self.conn, cfg)["answer"]
-        self.assertTrue(answer.startswith("Самое важное сейчас: Сдать эссе"))
+        cfg = {**DEFAULT_CONFIG, "tg_private": [], "interests": {"about": ["философия сознания"], "watch": [".intuition-"]}}
+        context, _ = assistant.build_context(self.conn, "Составь сводку по моим интересам", cfg)
+        self.assertIn(f"Сдать эссе (срок {soon[8:10]}.{soon[5:7]})", context)
+        self.assertIn("Интересные темы: философия сознания", context)
+        self.assertIn("Следит за: .intuition-", context)
 
     def test_named_chat_is_searched_even_for_a_long_question(self):
         for n, text in enumerate(("Давайте я сделаю презентацию к рассказу", "Отлично, тогда до вечера", "Кто идёт в кино?")):
@@ -1235,6 +1251,14 @@ class Assistant(unittest.TestCase):
 
     def test_one_stray_word_is_not_a_match(self):
         self.assertEqual(assistant.search(self.conn, "эссе кастрюлю поездка билеты самолёт"), [])
+
+    def test_refusal_is_not_a_task(self):
+        for text in ("Нет информации о поиске специалистов.", "нет", "Не требуется", "Ничего делать не нужно"):
+            self.assertEqual(local_ai.parse_reply(f"СУТЬ: Обсуждают\nДЕЛО: {text}")["action"], "", text)
+        self.assertEqual(local_ai.parse_reply("СУТЬ: Обсуждают\nДЕЛО: Ответить Вере")["action"], "Ответить Вере")
+        self.assertEqual(local_ai.parse_reply("СУТЬ: Обсуждают\nДЕЛО: Не забыть сдать отчёт")["action"], "Не забыть сдать отчёт")
+        chat = {"last": datetime.now(timezone.utc).isoformat(), "chat_id": 1}
+        self.assertEqual(analysis.live_action(chat, {"action": "Нет информации", "last_uid": "tg-1-5"}, {}, datetime.now(timezone.utc)), "")
 
     def test_answer_keeps_text_and_drops_references(self):
         raw = "ОТВЕТ: Да, Олег предлагал сделать презентацию [3] [Чат «Диптех», Олег, 31.10].\nИСТОЧНИКИ: 3, 9, 3"
@@ -1257,7 +1281,8 @@ class Assistant(unittest.TestCase):
 
     def test_context_lines_are_numbered(self):
         context, _, refs = assistant.gather(self.conn, "когда сдавать эссе?")
-        self.assertTrue(context.startswith("[1] Чат «Поток», Анна,"))
+        self.assertIn("\n[1] Чат «Поток», Анна,", context)
+        self.assertTrue(context.rstrip().endswith("Эссе сдаём до пятницы"), "сообщения идут последними, ближе к вопросу")
         self.assertEqual(len(refs), 1)
 
     def test_echoed_data_line_is_not_an_answer(self):
@@ -1948,15 +1973,12 @@ class Picks(unittest.TestCase):
         with patch.object(local_ai, "ask", lambda *a, **k: "что-то не то"):
             self.assertEqual(picks.process(self.conn, self.cfg, {}, "gemma"), 0)
 
-    def test_what_is_interesting_comes_from_picks(self):
+    def test_picks_are_numbered_for_the_model(self):
         picks.remember(self.conn, "tg-1-1", True, "Разбор квалиа", "")
-        self.assertTrue(assistant.asks_for_picks("Что интересного?"))
-        self.assertFalse(assistant.asks_for_picks("Что интересного в канале .intuition?"))
-        self.assertFalse(assistant.asks_for_picks("А что интересного по темам?", [{"role": "user", "text": "Что в канале .intuition?"}]))
-        result = assistant.picks_answer(self.conn)
-        self.assertIn("Канал А: Разбор квалиа", result["answer"])
-        self.assertEqual(result["quotes"][0]["source"], "Канал А")
-
+        context, _, refs = assistant.gather(self.conn, "Что интересного?", self.cfg)
+        self.assertIn("[1] Чат «Канал А», Автор,", context)
+        self.assertIn("(из подборки «Для вас»): Разбор квалиа", context)
+        self.assertEqual(refs[0]["uid"], "tg-1-1")
 
 class AskConversation(unittest.TestCase):
     def setUp(self):

@@ -10,7 +10,7 @@ import re
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 
-from . import agenda, db, replies
+from . import agenda, db, local_ai, replies
 from .config import DEFAULT_LEVEL, LEVELS, active_mode, chat_levels
 from .feeds import compile_topics, is_on_topic, topic_hits
 from .promises import PREFIX
@@ -348,8 +348,8 @@ def is_outdated(item):
 
 def live_action(chat, digest, answered, now):
     """Дело из разбора живо, пока вы не ответили позже него и оно не устарело."""
-    if not digest or not digest["action"]:
-        return ""
+    if not digest or not digest["action"] or local_ai.is_no_action(digest["action"]):
+        return ""  # старые разборы могли сохранить отказ модели как дело
     if now - datetime.fromisoformat(chat["last"]) > timedelta(hours=ACTION_HOURS):
         return ""
     tail = digest["last_uid"].rsplit("-", 1)[-1]

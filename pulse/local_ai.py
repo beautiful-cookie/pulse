@@ -37,6 +37,8 @@ MESSAGES_PER_CHAT = 40
 CHARS_PER_MESSAGE = 300
 MIN_NEW_MESSAGES = 5
 IMPORTANT_SCORE = 32
+CONTEXT_TOKENS = 8192  # вопрос на сайте несёт профиль, разборы чатов и сообщения
+NO_ACTION = re.compile(r"(нет\b|не\s+(?:требуется|нужно|надо|требует)|ничего\b|отсутству|никаких\b)", re.I)
 DAYS = 3
 
 _no_proxy = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -129,7 +131,7 @@ def _ensure_engine(cfg):
     flags = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
     process = subprocess.Popen(
         [str(setup_model.SERVER_FILE), "-m", str(setup_model.MODEL_FILE), "--host", "127.0.0.1", "--port", str(LLAMA_PORT),
-         "-c", "4096", "-t", str(LLAMA_THREADS), "--no-webui", "--reasoning", "off"],
+         "-c", str(CONTEXT_TOKENS), "-t", str(LLAMA_THREADS), "--no-webui", "--reasoning", "off"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
     _kill_with_parent(process)
     _engine.update(process=process, ready=False)
@@ -221,13 +223,18 @@ def clean_reply(text):
     return re.sub(r"<think>.*?</think>|<\|channel>.*?<channel\|>", "", text, flags=re.S).strip()
 
 
+def is_no_action(text):
+    """«Нет информации о …» модель пишет вместо «нет»: это отказ, а не дело."""
+    return bool(NO_ACTION.match(text.strip(" .«»\"'")))
+
+
 def parse_reply(text):
     text = clean_reply(text)
     summary = re.search(r"СУТЬ:\s*(.+)", text)
     action = re.search(r"ДЕЛО:\s*(.+)", text)
     return {
         "summary": (summary[1] if summary else text).strip()[:200],
-        "action": "" if not action or action[1].strip(" .«»").lower() == "нет" else action[1].strip()[:140],
+        "action": "" if not action or is_no_action(action[1]) else action[1].strip()[:140],
     }
 
 

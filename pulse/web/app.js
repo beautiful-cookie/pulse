@@ -36,6 +36,30 @@ let userRun = false;
 const taskIndex = {};
 const doneIndex = {};
 
+const calmMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+function vanish(el) {
+  // Строка не исчезает рывком: сжимается, и соседние плавно поднимаются на её место
+  if (!el) return Promise.resolve();
+  if (calmMotion()) { el.remove(); return Promise.resolve(); }
+  return new Promise((done) => {
+    el.style.height = `${el.offsetHeight}px`;
+    el.classList.add("leaving");
+    requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add("gone")));
+    setTimeout(() => { el.remove(); done(); }, 340);
+  });
+}
+
+function enter() {
+  // Появление только при переходе между разделами: обновление данных не должно дёргать страницу
+  if (calmMotion()) return;
+  view.classList.remove("enter");
+  void view.offsetWidth;
+  view.classList.add("enter");
+  clearTimeout(enter.timer);
+  enter.timer = setTimeout(() => view.classList.remove("enter"), 900);
+}
+
 const icon = (name, cls = "") => `<svg class="ico ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const safeUrl = (u) => (/^(https?:|obsidian:|tg:)/i.test(u || "") ? u : "");
@@ -185,7 +209,7 @@ async function completeTask(id, row) {
   const task = taskIndex[id];
   try {
     const result = await taskRequest({ action: "done", line: task.meta.line, raw: task.meta.raw, done: true });
-    row?.remove();
+    await vanish(row);
     toast("Готово и отмечено в Obsidian", "Отменить", async () => {
       await taskRequest({ action: "done", line: result.line, raw: result.raw, done: false });
       route();
@@ -407,8 +431,19 @@ function paintAsk() {
     box.innerHTML = `<p class="empty">Что вас интересует?</p><div class="ask-hints">${ASK_HINTS.map((h) => `<button type="button" class="chip" data-hint="${esc(h)}">${esc(h)}</button>`).join("")}</div>`;
     return;
   }
-  box.innerHTML = askLog.map((m) => `<div class="bubble ${m.role}">${esc(m.text)}${m.sources?.length ? `<div class="bubble-source">${esc(m.sources.join(", "))}</div>` : ""}</div>`).join("");
+  const text = (m) => (m.pending ? '<span class="typing" aria-label="Модель думает"><i></i><i></i><i></i></span>' : esc(m.text));
+  box.innerHTML = askLog.map((m) => `<div class="bubble ${m.role}">${text(m)}${quotesHtml(m.quotes)}${!m.quotes?.length && m.sources?.length ? `<div class="bubble-source">${esc(m.sources.join(", "))}</div>` : ""}</div>`).join("");
   box.scrollTop = box.scrollHeight;
+}
+
+function quotesHtml(quotes) {
+  if (!quotes?.length) return "";
+  return `<div class="quotes">${quotes.map((q) => {
+    const link = safeUrl(q.link);
+    const external = link.startsWith("http") ? 'target="_blank" rel="noreferrer noopener"' : "";
+    const head = [q.source, q.author, q.day].filter(Boolean).map(esc).join(" · ");
+    return `<blockquote class="quote"><div class="quote-head"><span>${head}</span>${link ? `<a href="${esc(link)}" ${external} title="Открыть сообщение">${icon("open")}</a>` : ""}</div>${esc(q.text)}</blockquote>`;
+  }).join("")}</div>`;
 }
 
 async function sendQuestion(question) {
@@ -419,7 +454,7 @@ async function sendQuestion(question) {
   paintAsk();
   try {
     const data = await api("/api/ask", { question: text, history });
-    askLog[askLog.length - 1] = { role: "bot", text: data.answer, sources: data.sources };
+    askLog[askLog.length - 1] = { role: "bot", text: data.answer, sources: data.sources, quotes: data.quotes };
   } catch (error) {
     askLog.pop();
     askLog.pop();
@@ -572,7 +607,7 @@ function renderToday(data) {
       <div class="modes" role="group" aria-label="Режим внимания">
         ${data.modes.map((m) => `<button data-mode="${esc(m.id)}" aria-pressed="${m.id === data.active_mode}">${esc(m.name)}</button>`).join("")}
       </div>
-      <div class="top-right"><span id="run-stage" title="${esc(updated)}">${esc(data.running ? `${data.stage.text}…` : last)}</span>
+      <div class="top-right"><span id="run-stage" class="${data.running ? "busy" : ""}" title="${esc(updated)}">${esc(data.running ? `${data.stage.text}…` : last)}</span>
         <button class="icon-btn ${data.running ? "spin" : ""}" id="refresh" ${data.running ? "disabled" : ""} title="Обновить" aria-label="Обновить">${icon("refresh")}</button></div>
     </header>
     <div class="home">
@@ -633,7 +668,7 @@ async function startCollect() {
   const button = document.getElementById("refresh");
   if (button) { button.disabled = true; button.classList.add("spin"); }
   const label = document.getElementById("run-stage");
-  if (label) label.textContent = "Обновляю новости и чаты…";
+  if (label) { label.textContent = "Обновляю новости и чаты…"; label.classList.add("busy"); }
   freshShown = false;
   userRun = true;
   await api("/api/collect", {});
@@ -1079,7 +1114,7 @@ view.addEventListener("change", async (event) => {
   const mover = event.target.closest("[data-move]");
   if (mover) return moveTask(taskIndex[mover.dataset.move].meta, statusOf(mover.value));
   const done = event.target.closest("[data-done]");
-  if (done) return completeTask(done.dataset.done, done.closest(".todo, .task-row"));
+  if (done) return completeTask(done.dataset.done, done.closest(".todo, .task-row, .do-row"));
   const dateField = event.target.closest("[data-due]");
   if (dateField) {
     const task = taskIndex[dateField.dataset.due];
@@ -1094,7 +1129,12 @@ view.addEventListener("click", async (event) => {
   const chatDone = event.target.closest("[data-chat-done]");
   if (chatDone) {
     event.preventDefault();
-    try { await api("/api/chat-done", { name: chatDone.dataset.chatDone, why: "done" }); toast("Убрано из списка"); route(); } catch (error) { toast(error.message); }
+    try {
+      await api("/api/chat-done", { name: chatDone.dataset.chatDone, why: "done" });
+      toast("Убрано из списка");
+      await vanish(chatDone.closest(".do-row"));
+      route();
+    } catch (error) { toast(error.message); }
     return;
   }
   const chatSkip = event.target.closest("[data-chat-skip]");
@@ -1105,6 +1145,7 @@ view.addEventListener("click", async (event) => {
       const state = await api("/api/chat-done", { name, why: "unimportant" });
       if (state.quiet) toast(`Чат «${name}» теперь «тише»`, "Вернуть", async () => { await api("/api/chat-level", { name, level: "обычно" }); route(); });
       else toast("Учту. После трёх таких отметок чат станет тише");
+      await vanish(chatSkip.closest(".do-row"));
       route();
     } catch (error) { toast(error.message); }
     return;
@@ -1164,7 +1205,7 @@ view.addEventListener("click", async (event) => {
     await api(`/api/item/${card.dataset.id}`, body);
   } catch (error) { return toast(error.message); }
   if (act === "seen" || (act === "down" && !toggled)) {
-    card.remove();
+    vanish(card);
     if (act === "down") toast("Учту: похожее будет ниже");
     return;
   }
@@ -1199,11 +1240,13 @@ document.getElementById("theme").onclick = () => {
     ? document.documentElement.dataset.theme === "dark"
     : matchMedia("(prefers-color-scheme: dark)").matches;
   const next = dark ? "light" : "dark";
+  document.documentElement.classList.add("theme-fade");
+  setTimeout(() => document.documentElement.classList.remove("theme-fade"), 450);
   applyTheme(next);
   try { localStorage.setItem("pulse-theme", next); } catch { /* тема просто не запомнится */ }
 };
 
-async function route() {
+async function route(animate = false) {
   const token = ++routeToken;  // ответ для уже покинутого экрана не должен его перерисовать
   const [name, param] = (location.hash.slice(1) || "today").split("/");
   document.querySelectorAll(".rail a").forEach((a) => {
@@ -1221,11 +1264,12 @@ async function route() {
   } catch (error) {
     view.innerHTML = `<p class="empty">Не удалось загрузить: ${esc(error.message)}</p>`;
   }
+  if (animate && token === routeToken) enter();
   view.focus({ preventScroll: true });
 }
 
 applyTheme(storedTheme());
 setupAsk();
 watchUpdates();
-addEventListener("hashchange", route);
-route();
+addEventListener("hashchange", () => route(true));
+route(true);

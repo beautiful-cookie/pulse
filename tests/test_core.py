@@ -7,7 +7,7 @@ import sqlite3
 import sys
 import threading
 import unittest
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import StringIO
@@ -1235,6 +1235,30 @@ class Assistant(unittest.TestCase):
 
     def test_one_stray_word_is_not_a_match(self):
         self.assertEqual(assistant.search(self.conn, "эссе кастрюлю поездка билеты самолёт"), [])
+
+    def test_answer_keeps_text_and_drops_references(self):
+        raw = "ОТВЕТ: Да, Олег предлагал сделать презентацию [3] [Чат «Диптех», Олег, 31.10].\nИСТОЧНИКИ: 3, 9, 3"
+        self.assertEqual(assistant.final_answer(raw), "Да, Олег предлагал сделать презентацию.")
+        self.assertEqual(assistant.cited_numbers(raw, 5), [3])
+        self.assertEqual(assistant.cited_numbers("ОТВЕТ: Нет.\nИСТОЧНИКИ: нет", 5), [])
+        self.assertEqual(assistant.cited_numbers("ОТВЕТ: Да [2].", 5), [2])
+
+    def test_quotes_come_from_the_database_not_the_model(self):
+        db.upsert_item(self.conn, {"uid": "tg-9-1", "kind": "message", "source_type": "tg_private", "source_name": "Диптех головного мозга",
+                                   "title": "Сделаю презентацию к экскурсии", "body": "Сделаю презентацию к экскурсии", "author": "Олег",
+                                   "published": db.now_iso(), "meta": {"chat_id": -105, "chat_kind": "группа"}})
+        model_text = "ОТВЕТ: Да, писали.\nИСТОЧНИКИ: 1"
+        with patch.object(db, "connect", lambda: nullcontext(self.conn)), \
+                patch.object(local_ai, "running_model", lambda cfg: nullcontext((cfg, "gemma"))), patch.object(local_ai, "ask", lambda *a, **k: model_text):
+            result = assistant.answer({}, "Писали ли в чате по диптеху про презентацию?")
+        self.assertEqual(result["answer"], "Да, писали.")
+        self.assertEqual(result["quotes"], [{"source": "Диптех головного мозга", "author": "Олег", "day": datetime.now().strftime("%d.%m"),
+                                             "text": "Сделаю презентацию к экскурсии", "link": "tg://openmessage?chat_id=105&message_id=1"}])
+
+    def test_context_lines_are_numbered(self):
+        context, _, refs = assistant.gather(self.conn, "когда сдавать эссе?")
+        self.assertTrue(context.startswith("[1] Чат «Поток», Анна,"))
+        self.assertEqual(len(refs), 1)
 
     def test_echoed_data_line_is_not_an_answer(self):
         with self.assertRaises(ValueError):

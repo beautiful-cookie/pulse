@@ -63,4 +63,9 @@ def run():
         check_news(conn)
     line(bool(local_ai.cached_model(cfg)), f"локальная модель: {local_ai.cached_model(cfg) or 'не запущена'}")
     line(bool(claude_ai.find_cli()), "Claude: программа найдена" if claude_ai.find_cli() else "Claude: программа не найдена")
+    age = claude_ai.token_age_days()
+    if age is None:
+        line(False, "Claude: обычный вход, он может слетать; постоянный даст claude_login.bat")
+    else:
+        line(age < claude_ai.TOKEN_DAYS - 30, f"Claude: постоянный вход, осталось около {max(0, round(claude_ai.TOKEN_DAYS - age))} дн.")
     print(f"     автозапуск: {'включён' if autostart.is_enabled() else 'выключен'}")

@@ -1,6 +1,7 @@
 """Русский текст без внешних библиотек: основы слов, ключевые слова, сроки."""
 import html
 import re
+from functools import lru_cache
 from datetime import date, timedelta
 
 WORD_RE = re.compile(r"[a-zа-яё0-9]+", re.I)
@@ -50,6 +51,7 @@ def norm(word):
     return word.lower().replace("ё", "е")
 
 
+@lru_cache(maxsize=200_000)
 def stem(word):
     word = norm(word)
     if not re.search("[а-я]", word):
@@ -65,6 +67,30 @@ def stems(text):
     return [stem(w) for w in WORD_RE.findall(text or "") if norm(w) not in STOP and len(w) > 2 and not w.isdigit()]
 
 
+class Keyword:
+    """Регулярное выражение с быстрой проверкой: без основы слова в тексте искать нечего.
+
+    Тексты постов длинные, и поиск с границами слов по каждому ключевому слову
+    занимал почти всё время пересчёта оценок.
+    """
+    _last = ("", "")  # один и тот же текст проверяют подряд все ключевые слова
+
+    def __init__(self, pattern, needle, exact):
+        self.pattern, self.needle, self.exact = pattern, needle, exact
+
+    def search(self, text):
+        if self.exact:
+            haystack = text
+        else:
+            last = Keyword._last
+            if last[0] is text:
+                haystack = last[1]
+            else:
+                haystack = text.lower()
+                Keyword._last = (text, haystack)
+        return self.pattern.search(text) if self.needle in haystack else None
+
+
 def keyword_regex(keyword):
     """Ключевое слово в регулярное выражение с учётом русских окончаний.
 
@@ -73,18 +99,22 @@ def keyword_regex(keyword):
     """
     keyword = keyword.strip()
     if len(keyword) <= 4 and keyword.upper() == keyword and "*" not in keyword:
-        return re.compile(rf"(?<![\w-]){re.escape(keyword)}(?![\w])")
-    parts = []
+        return Keyword(re.compile(rf"(?<![\w-]){re.escape(keyword)}(?![\w])"), keyword, True)
+    parts, literals = [], []
     for word in keyword.split():
         if word.endswith("*"):
-            parts.append(re.escape(norm(word[:-1])) + r"\w*")
+            literals.append(norm(word[:-1]))
+            parts.append(re.escape(literals[-1]) + r"\w*")
         elif re.search("[а-яё]", word, re.I):
             base = re.sub(r"[аеёиоуыэюяйь]+$", "", norm(word), flags=re.I)
             base = base if len(base) >= 3 else norm(word)
+            literals.append(base)
             parts.append(re.escape(base) + r"[а-я]{0,4}")
         else:
-            parts.append(re.escape(norm(word)) + r"[a-z]{0,3}")
-    return re.compile(r"(?<![\w])" + r"[\s-]+".join(parts) + r"(?![\w])", re.I)
+            literals.append(norm(word))
+            parts.append(re.escape(literals[-1]) + r"[a-z]{0,3}")
+    pattern = re.compile(r"(?<![\w])" + r"[\s-]+".join(parts) + r"(?![\w])", re.I)
+    return Keyword(pattern, literals[0] if literals else "", False)
 
 
 def extract_due(text, anchor):

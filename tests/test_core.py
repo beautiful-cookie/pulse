@@ -3,6 +3,7 @@ import http.client
 import io
 import json
 import os
+import tempfile
 import sqlite3
 import sys
 import threading
@@ -153,6 +154,14 @@ class Relevance(unittest.TestCase):
     def test_exclusion_wins(self):
         topic = self.topic(["сознание"], ["потерял* сознание"])
         self.assertFalse(feeds.is_on_topic(topic, "Водитель потерял сознание", ""))
+
+    def test_quick_check_finds_the_same_as_the_full_pattern(self):
+        texts = ["Новая ТЕОРИЯ Сознания", "ИИ и ЦБ", "ии без капса", "Нейросети-трансформеры", "Large Language Models",
+                 "нейро сеть", "Нейробиология сна", "Ёлка", "", "AI-ассистент", "said AI"]
+        for keyword in ["сознание", "ИИ", "AI", "нейросет*", "language model", "нейро сеть", "сон", "елка", "Claude"]:
+            rx = keyword_regex(keyword)
+            for text in texts:
+                self.assertEqual(bool(rx.search(text)), bool(rx.pattern.search(text)), (keyword, text))
 
     def test_search_result_must_confirm_topic(self):
         cfg = {"topics": [{"id": "t", "keywords": ["consciousness"], "exclude": []}]}
@@ -1012,6 +1021,16 @@ class ClaudeFallback(unittest.TestCase):
             env = claude_ai.clean_env()
         self.assertNotIn("CLAUDE_CODE_X", env)
         self.assertNotIn("ANTHROPIC_BASE_URL", env)
+
+    def test_saved_token_replaces_the_shared_login(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "claude_token.txt"
+            with patch.object(claude_ai, "TOKEN_PATH", path), patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "чужой"}):
+                self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", claude_ai.auth_env())
+                self.assertIsNone(claude_ai.token_age_days())
+                path.write_text("sk-ant-oat01-test\n", encoding="utf-8")
+                self.assertEqual(claude_ai.auth_env()["CLAUDE_CODE_OAUTH_TOKEN"], "sk-ant-oat01-test")
+                self.assertLess(claude_ai.token_age_days(), 1)
 
     def test_expired_login_is_unavailable_not_a_summary(self):
         result = SimpleNamespace(returncode=1, stdout="Failed to authenticate: OAuth session expired", stderr="")

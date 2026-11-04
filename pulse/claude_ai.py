@@ -9,6 +9,9 @@ import os
 import re
 import subprocess
 import tempfile
+import time
+
+from .config import DATA
 
 PUBLIC_KINDS = {"news", "post"}
 PUBLIC_SOURCES = {"rss", "tg_public"}
@@ -16,6 +19,8 @@ TIMEOUT_SECONDS = 300
 CLI_GLOB = r"%LOCALAPPDATA%\Claude-Data\*\claude-code\*\*\claude.exe"
 PUBLIC_CHAT_URL = re.compile(r"^https://t\.me/(?!c/)[A-Za-z0-9_]{4,}/\d+$")
 LOGIN_ERRORS = ("Failed to authenticate", "OAuth", "not logged in", "Invalid API key", "/login")
+TOKEN_PATH = DATA / "claude_token.txt"
+TOKEN_DAYS = 365  # столько живёт токен из claude setup-token
 
 
 class Unavailable(Exception):
@@ -60,6 +65,30 @@ def clean_env():
     return {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE", "ANTHROPIC"))}
 
 
+def saved_token():
+    try:
+        return TOKEN_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def token_age_days():
+    return (time.time() - TOKEN_PATH.stat().st_mtime) / 86400 if saved_token() else None
+
+
+def auth_env():
+    """Обычный вход живёт часы и обновляется через общий файл, который делят все программы Claude.
+
+    Когда одна из них обновляет вход, у остальных он слетает. Токен из setup-token
+    действует год и ни с кем не делится, поэтому Пульс берёт его, если он сохранён.
+    """
+    env = clean_env()
+    token = saved_token()
+    if token:
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    return env
+
+
 def command(cli, model):
     return [cli, "-p", "--model", model, "--output-format", "text", "--tools", "WebSearch,WebFetch",
             "--allowedTools", "WebSearch,WebFetch", "--strict-mcp-config", "--setting-sources", "",
@@ -74,12 +103,13 @@ def run(prompt, cfg, model=None):
     with tempfile.TemporaryDirectory() as folder:
         try:
             result = subprocess.run(command(cli, model or cfg["claude"]["model"]), input=prompt, capture_output=True, encoding="utf-8",
-                                    errors="replace", timeout=TIMEOUT_SECONDS, cwd=folder, env=clean_env(), creationflags=flags)
+                                    errors="replace", timeout=TIMEOUT_SECONDS, cwd=folder, env=auth_env(), creationflags=flags)
         except (OSError, subprocess.TimeoutExpired) as error:
             raise Unavailable(type(error).__name__) from error
     output = result.stdout.strip()
     if result.returncode != 0 or not output or any(mark in output[:200] for mark in LOGIN_ERRORS):
-        raise Unavailable("нужен вход: запустите claude_login.bat")
+        raise Unavailable("токен Claude не подошёл: запустите claude_login.bat заново" if saved_token()
+                          else "нужен вход: запустите claude_login.bat")
     return output
 
 
@@ -100,7 +130,22 @@ def summarize(item, text, prompt, cfg, model=None):
 
 
 def login():
+    """Постоянный вход: Claude выдаёт токен на год, Пульс хранит его в data/ на этом компьютере."""
     cli = find_cli()
     if not cli:
         raise SystemExit("Claude не найден. Откройте приложение Claude и повторите.")
-    subprocess.run([cli, "auth", "login"], env=clean_env())
+    print("Сейчас откроется браузер. Войдите в Claude, и в этом окне появится длинный токен, он начинается с sk-ant-.\n")
+    subprocess.run([cli, "setup-token"], env=clean_env())
+    token = input("\nСкопируйте токен целиком и вставьте сюда (правая кнопка мыши), затем Enter: ").strip()
+    if not token:
+        raise SystemExit("Токен не введён, ничего не изменилось.")
+    if not token.startswith("sk-ant-") or any(c.isspace() for c in token):
+        raise SystemExit("Это не похоже на токен Claude: он начинается с sk-ant- и идёт одной строкой. Запустите ещё раз.")
+    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TOKEN_PATH.write_text(token, encoding="utf-8")
+    print("Токен сохранён. Проверяю…")
+    try:
+        run("Ответь одним словом: готово", {"claude": {"model": "haiku"}})
+        print("Claude отвечает. Повторный вход понадобится примерно через год.")
+    except Unavailable as error:
+        print(f"Claude не ответил: {error}")

@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from . import agenda, db, local_ai, replies
 from .config import DEFAULT_LEVEL, LEVELS, active_mode, chat_levels
-from .feeds import compile_topics, is_on_topic, topic_hits
+from .feeds import compile_topics, topic_hits
 from .promises import PREFIX
 from .text import extract_due, keyword_regex, stems
 
@@ -101,10 +101,11 @@ def assign_clusters(items):
     news = [it for it in items if it["kind"] in ("news", "post")]
     for it in news:
         it["_title_words"] = set(stems(it["title"]))
+        it["_day"] = _day(it)
     news.sort(key=lambda it: it["published"])
     for i, a in enumerate(news):
         for b in news[i + 1:]:
-            if (_day(b) - _day(a)).days > CLUSTER_WINDOW_DAYS:
+            if (b["_day"] - a["_day"]).days > CLUSTER_WINDOW_DAYS:
                 break
             if len(a["_title_words"]) < 3 or len(b["_title_words"]) < 3:
                 continue
@@ -139,7 +140,7 @@ def score_item(item, ctx):
     best = 0.0
     for topic in ctx["topics"]:
         title_hits, body_hits = topic_hits(topic, item["title"], item["body"])
-        on_topic = is_on_topic(topic, item["title"], item["body"])
+        on_topic = title_hits > 0 or body_hits >= 2  # то же, что is_on_topic, без второго поиска
         strength = min(1.0, (title_hits * 2 + body_hits) / 3) if on_topic else 0.0
         if meta.get("feed_topic") == topic["id"] and (title_hits or body_hits or not meta.get("search")):
             strength = max(strength, 0.6)

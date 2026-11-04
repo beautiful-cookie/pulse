@@ -755,6 +755,16 @@ function watchUpdates() {
   }, 60000);
 }
 
+function waitForRescore() {
+  // Режим включается сразу, а оценки новостей пересчитываются в фоне за несколько секунд
+  clearTimeout(waitForRescore.timer);
+  waitForRescore.timer = setTimeout(async () => {
+    const status = await api("/api/status").catch(() => null);
+    if (status?.rescoring) return waitForRescore();
+    if ((location.hash.slice(1) || "today") === "today" && isCalm()) route();
+  }, 1000);
+}
+
 function waitForRun() {
   clearTimeout(waitForRun.timer);
   waitForRun.timer = setTimeout(async () => {
@@ -1333,7 +1343,8 @@ view.addEventListener("click", async (event) => {
   if (reopen) return moveTask(doneIndex[reopen.dataset.reopen], " ");
   const modeButton = event.target.closest("[data-mode]");
   if (modeButton) {
-    try { await api("/api/mode", { id: modeButton.dataset.mode }); route(); } catch (error) { toast(error.message); }
+    document.querySelectorAll("[data-mode]").forEach((b) => b.setAttribute("aria-pressed", String(b === modeButton)));
+    try { await api("/api/mode", { id: modeButton.dataset.mode }); route(); waitForRescore(); } catch (error) { toast(error.message); route(); }
     return;
   }
   const summaryButton = event.target.closest("[data-summary]");

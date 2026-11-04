@@ -155,7 +155,7 @@ def set_mode(mode_id):
         raise ValueError("Нет такого режима")
     cfg["active_mode"] = mode_id
     save_config(cfg)
-    rescore(cfg)
+    rescore_later()
 
 
 def set_chat_level(name, level):
@@ -167,12 +167,35 @@ def set_chat_level(name, level):
         raise ValueError("Этого чата нет в списке")
     chat["level"] = level
     save_config(cfg)
-    rescore(cfg)
+    rescore_later()
 
 
 def rescore(cfg):
     with db.connect() as conn:
         analysis.run(conn, cfg)
+
+
+_rescore_lock = threading.Lock()
+_pending_lock = threading.Lock()
+_pending = [0]  # сколько пересчётов ждёт или идёт
+
+
+def rescore_later():
+    """Пересчёт оценок в фоне: экран меняется сразу, порядок новостей догоняет за секунды."""
+    def work():
+        with _rescore_lock:  # подряд нажатые режимы считаются по очереди, последний побеждает
+            try:
+                rescore(load_config())
+            finally:
+                with _pending_lock:
+                    _pending[0] -= 1
+    with _pending_lock:
+        _pending[0] += 1
+    threading.Thread(target=work, daemon=True).start()
+
+
+def is_rescoring():
+    return _pending[0] > 0
 
 
 def mark_chat(name, why):
@@ -198,7 +221,7 @@ def update_item(item_id, body):
     with db.connect() as conn:
         conn.execute(f"UPDATE items SET {', '.join(fields)} WHERE id=?", (*args, item_id))
     if "feedback" in body:  # отметка должна сказаться сразу, а не при следующем сборе новостей
-        threading.Thread(target=rescore, args=(load_config(),), daemon=True).start()
+        rescore_later()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -283,7 +306,8 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/status":
                 with db.connect() as conn:
                     return self._json({"running": pipeline.is_running(), "stage": pipeline.stage(), "error": pipeline.last_error(),
-                                       "last_run": db.kv_get(conn, "last_run"), "marks": db.kv_get(conn, "run_marks", {})})
+                                       "last_run": db.kv_get(conn, "last_run"), "marks": db.kv_get(conn, "run_marks", {}),
+                                       "rescoring": is_rescoring()})
         except Exception as error:
             return self._json({"error": f"{type(error).__name__}: {error}"}, 500)
         self._static(url.path)
@@ -372,7 +396,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/learned":
                 with db.connect() as conn:
                     learning.forget(conn)
-                threading.Thread(target=rescore, args=(load_config(),), daemon=True).start()
+                rescore_later()
                 return self._json({"ok": True})
         except ValueError as error:
             return self._json({"error": str(error)}, 400)

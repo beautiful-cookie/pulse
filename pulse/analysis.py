@@ -358,6 +358,11 @@ def live_action(chat, digest, answered, now):
     return digest["action"]
 
 
+def message_id(item):
+    tail = item["uid"].rsplit("-", 1)[-1]
+    return int(tail) if tail.isdigit() else 0
+
+
 def message_link(item):
     """Ссылка на сообщение. У личных чатов и обычных групп нет адреса в интернете."""
     if item["url"]:
@@ -389,6 +394,7 @@ def chat_view(conn, since, today, cfg):
     levels = chat_levels(cfg)
     only_important = active_mode(cfg)["chats"] == "important"
     my_last = db.answered_ids(conn)
+    dismissed = db.kv_get(conn, "reply_dismissed", {})
     now = datetime.now(timezone.utc)
     checks = replies.load_checks(conn)
     messages = [db.row_to_item(r) for r in conn.execute(
@@ -406,7 +412,8 @@ def chat_view(conn, since, today, cfg):
         })
         chat["count"] += 1
         wants_reply = needs_reply(item, my_last, checks)
-        has_due = level != "тише" and bool(item["due"] and item["due"] >= today.isoformat())
+        has_due = (level != "тише" and bool(item["due"] and item["due"] >= today.isoformat())
+                   and message_id(item) > dismissed.get(str(item["meta"].get("chat_id")), 0))
         if wants_reply:
             chat["reply"] += 1
             chat["waiting_since"] = item["published"]  # сообщения идут от новых к старым

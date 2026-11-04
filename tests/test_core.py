@@ -1364,6 +1364,22 @@ class Replies(unittest.TestCase):
         self.add(conn, "tg-5-4", "А завтра сможешь?")
         self.assertEqual(waiting(), ["Мама"])
 
+    def test_done_chat_with_a_deadline_does_not_come_back(self):
+        conn = self.conn()
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        post = lambda uid: db.upsert_item(conn, {
+            "uid": uid, "kind": "message", "source_type": "tg_private", "source_name": "Карьера", "title": "Регистрация до завтра",
+            "body": "Регистрация до завтра", "published": db.now_iso(), "due": tomorrow, "meta": {"chat_id": -100, "chat_kind": "канал"}})
+        post("tg--100-7")
+        cfg = {"tg_private": [], "modes": DEFAULT_CONFIG["modes"], "active_mode": "all"}
+        since = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+        shown = lambda: [c["name"] for c in analysis.chat_view(conn, since, date.today(), cfg)["signals"]]
+        self.assertEqual(shown(), ["Карьера"])
+        analysis.dismiss_chat(conn, "Карьера")
+        self.assertEqual(shown(), [])
+        post("tg--100-8")
+        self.assertEqual(shown(), ["Карьера"])
+
 
 class Freshness(unittest.TestCase):
     def conn(self):

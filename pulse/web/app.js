@@ -387,10 +387,13 @@ function doRow(row, lead) {
   if (row.task) {
     remember(row.task);
     const when = whenLabel(row.task.due);
+    const remove = isFromChat(row.task)
+      ? `<button class="tool" data-reject="${row.task.id}" title="Удалить: не дело, больше не добавлять" aria-label="Удалить: ${esc(row.task.title)}">${icon("trash")}</button>`
+      : `<button class="tool" data-delete="${row.task.id}" title="Удалить из «Актуального»" aria-label="Удалить: ${esc(row.task.title)}">${icon("trash")}</button>`;
     return `<div class="${cls}">
       <input type="checkbox" class="task-check" data-done="${row.task.id}" aria-label="Готово: ${esc(row.task.title)}">
       <a class="do-text" href="${esc(safeUrl(row.task.url))}"><span class="do-title">${esc(taskTitle(row.task))}</span></a>
-      <span class="when ${when.tone}">${esc(when.text)}</span></div>`;
+      <span class="do-side"><span class="do-tools">${remove}</span><span class="when ${when.tone}">${esc(when.text)}</span></span></div>`;
   }
   const { chat } = row;
   const when = chat.due ? whenLabel(chat.due) : null;
@@ -404,7 +407,7 @@ function doRow(row, lead) {
     <span class="do-side">
       <span class="do-tools">
         ${link ? `<a class="tool" href="${esc(link)}" ${external} title="Открыть сообщение в Telegram" aria-label="Открыть в Telegram">${icon("open")}</a>` : ""}
-        <button class="tool" data-chat-skip="${esc(chat.name)}" title="Не важно: Пульс учтёт это для этого чата" aria-label="Не важно: ${esc(chat.name)}">${icon("down")}</button>
+        <button class="tool" data-chat-skip="${esc(chat.name)}" title="Удалить: не важно, Пульс учтёт это для чата" aria-label="Удалить: ${esc(chat.name)}">${icon("trash")}</button>
       </span>${when ? `<span class="when ${when.tone}">${esc(when.text)}</span>` : ""}</span></div>`;
 }
 
@@ -1344,6 +1347,8 @@ view.addEventListener("click", async (event) => {
     try {
       await taskRequest({ action: rejecting ? "reject" : "delete", line: task.meta.line, raw: task.meta.raw });
       toast(rejecting ? "Убрано, больше не добавлю" : "Удалено из «Актуального»");
+      const row = removeButton.closest(".do-row");
+      if (row) await vanish(row);
       route();
     } catch (error) { toast(error.message); route(); }
     return;

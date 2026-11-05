@@ -90,6 +90,16 @@ CREATE TABLE IF NOT EXISTS picks (
   created TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS suggestions (
+  uid TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,                   -- gigs, jobs, events, reads
+  fit INTEGER NOT NULL,                 -- 1 подходит, 0 проверка сказала «нет»
+  why TEXT NOT NULL DEFAULT '',
+  feedback INTEGER NOT NULL DEFAULT 0,  -- +1 подходит, -1 не то
+  by TEXT NOT NULL DEFAULT 'model',     -- кто проверил: model или claude
+  created TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 """
 

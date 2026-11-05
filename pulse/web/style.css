@@ -631,3 +631,29 @@ button:active:not(:disabled), .btn:active, .chip:active { transform: scale(.97);
 .folder[open] > summary .chev { transform: rotate(90deg); }
 .folder-tools { display: flex; gap: 14px; font-size: 12.5px; padding-bottom: 4px; }
 .folder .chatlist { margin-top: 2px; }
+
+/* Предложка */
+.sg-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
+.sg-bar .btn { display: inline-flex; align-items: center; gap: 6px; }
+.sg-bar .btn .ico { width: 14px; height: 14px; }
+.sg-bar .btn:disabled { opacity: .5; cursor: default; }
+.sg-job { color: var(--muted); font-size: 13px; }
+.sg-job .busy { animation: breathe 1.6s ease-in-out infinite; }
+.sg-job .bad-text { color: var(--bad, #c0392b); }
+.sg-about { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; margin-bottom: 12px; background: var(--surface); }
+.sg-about summary { cursor: pointer; font-size: 14px; color: var(--ink-2); }
+.sg-about textarea { width: 100%; margin-top: 8px; border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 10px; background: var(--page); resize: vertical; box-sizing: border-box; }
+.sg-about-foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 8px; }
+.sg-about-foot small { color: var(--muted); font-size: 12px; }
+.sg-show { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; color: var(--muted); font-size: 13px; margin-bottom: 10px; }
+.sg-toggle { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-2); cursor: pointer; }
+.chip span { color: inherit; opacity: .6; font-variant-numeric: tabular-nums; }
+.sg-list { max-width: 760px; }
+.sg-list .pick { padding: 12px 0; }
+.sg-by { color: var(--muted); }
+.sg .when { font-weight: 500; }
+.sg-label { display: flex; justify-content: space-between; align-items: baseline; }
+.sg-label .link { font-size: 12px; }
+.sg.compact .pick-gist { font-size: 14.5px; }
+#home-suggest:empty { display: none; }
+@media (max-width: 720px) { .sg-about-foot { flex-direction: column; align-items: stretch; } }

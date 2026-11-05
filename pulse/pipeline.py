@@ -5,7 +5,7 @@ import threading
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from . import analysis, claude_ai, db, deadlines, feeds, local_ai, notify, obsidian, picks, promises, replies, telegram
+from . import analysis, claude_ai, db, deadlines, feeds, local_ai, notify, obsidian, picks, promises, replies, suggest, telegram
 from .agenda import CHAT_SECTION, done_tasks
 from .config import BRIEF_PATH, EXPORT_PATH, load_config, muted_chats
 
@@ -149,8 +149,8 @@ def move_channels_to_news(conn):
 def run_local_model(conn, cfg):
     """Модель запускается, только когда есть работа: она занимает около 4 ГБ памяти."""
     if not (deadlines.has_work(conn, cfg) or promises.has_work(conn, cfg) or picks.has_work(conn, cfg)
-            or local_ai.chats_to_digest(conn, muted_chats(cfg)) or replies.pending(conn)):
-        return {"deadlines": 0, "promises": 0, "picks": 0, "digests": 0}
+            or local_ai.chats_to_digest(conn, muted_chats(cfg)) or replies.pending(conn) or suggest.has_work(conn, cfg)):
+        return {"deadlines": 0, "promises": 0, "picks": 0, "suggest": 0, "digests": 0}
     with local_ai.running_model(cfg) as (model_cfg, model):
         added = deadlines.process(conn, cfg, model_cfg, model)
         promised = promises.process(conn, cfg, model_cfg, model)
@@ -158,10 +158,11 @@ def run_local_model(conn, cfg):
         if model:
             replies.refresh(conn, model_cfg, model)
         chosen = picks.process(conn, cfg, model_cfg, model)
+        suggested = suggest.process(conn, cfg, model_cfg, model)
         digests = local_ai.refresh_digests(conn, model_cfg, model) if model else 0
     if added or promised:
         refresh_tasks(conn, cfg)
-    return {"deadlines": added, "promises": promised, "picks": chosen, "digests": digests}
+    return {"deadlines": added, "promises": promised, "picks": chosen, "suggest": suggested, "digests": digests}
 
 
 def refresh_tasks(conn, cfg):

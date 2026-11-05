@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import agenda, analysis, assistant, autostart, claude_ai, claude_ask, db, deadlines, digest, interests, learning, local_ai, picks, pipeline, remote, summaries, telegram
+from . import agenda, analysis, assistant, autostart, claude_ai, claude_ask, db, deadlines, digest, interests, learning, local_ai, picks, pipeline, remote, suggest, summaries, telegram
 from .config import LEVELS, load_config, save_config
 
 _agenda_lock = threading.Lock()
@@ -24,7 +24,8 @@ ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 SETTINGS_KEYS = {"topics", "feeds", "tg_public", "tg_private", "blacklist", "budget_main",
                  "topic_cap", "chat_interval_min", "news_interval_min", "model_interval_min", "full_collect_hour",
                  "notify", "interests", "me", "privacy", "deadlines", "claude", "modes"}
-LOOPBACK_ONLY = {"/api/settings", "/api/remote", "/api/shutdown", "/api/autostart", "/api/learned", "/api/tg-dialogs"}  # с телефона это менять нельзя
+LOOPBACK_ONLY = {"/api/settings", "/api/remote", "/api/shutdown", "/api/autostart", "/api/learned", "/api/tg-dialogs",
+                 "/api/suggest-about", "/api/suggest-kinds"}  # с телефона это менять нельзя
 PAGE = 40
 MAX_BODY_BYTES = 2_000_000
 
@@ -147,6 +148,35 @@ def task_action(body):
             raise ValueError("Нет такого действия")
         pipeline.refresh_tasks(conn, cfg)
     return result
+
+
+def suggest_payload(home=False):
+    cfg = load_config()
+    with db.connect() as conn:
+        return suggest.home(conn, cfg) if home else suggest.view(conn, cfg)
+
+
+def suggest_task(uid):
+    """«В дела»: предложение становится строкой «Актуального», со сроком, если он был в тексте."""
+    cfg = load_config()
+    with db.connect() as conn:
+        item = next((s for s in suggest.candidates(conn, cfg) if s["uid"] == uid), None)
+    if item is None:
+        raise LookupError("Такого предложения уже нет")
+    result = task_action({"action": "add", "text": f"{item['title'][:120]} · {item['source']}", "due": item["when"]})
+    with db.connect() as conn:
+        suggest.rate(conn, uid, 1)
+    return result
+
+
+def suggest_about(text):
+    cfg = load_config()
+    cfg["claude"]["profile"] = str(text or "").strip()[:claude_ask.PROFILE_CHARS]
+    save_config(cfg)
+
+
+def suggest_kinds(mode_id, kinds):
+    save_config(suggest.set_kinds(load_config(), mode_id, kinds))
 
 
 def set_mode(mode_id):
@@ -285,6 +315,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path == "/api/today":
                 return self._json(today_payload())
+            if url.path == "/api/suggest":
+                return self._json(suggest_payload(home="home" in query))
+            if url.path == "/api/suggest-run":
+                return self._json(suggest.status())
             if url.path == "/api/feed":
                 return self._json(feed_payload(query))
             if url.path == "/api/analytics":
@@ -385,6 +419,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True})
             if path == "/api/chat-done":
                 return self._json({"ok": True, **mark_chat(body.get("name"), body.get("why"))})
+            if path == "/api/suggest-run":
+                return self._json(suggest.start(load_config(), body.get("engine")))
+            if path == "/api/suggest-rate":
+                with db.connect() as conn:
+                    suggest.rate(conn, str(body.get("uid")), body.get("feedback"))
+                return self._json({"ok": True})
+            if path == "/api/suggest-task":
+                return self._json({"ok": True, **suggest_task(str(body.get("uid")))})
+            if path == "/api/suggest-about":
+                suggest_about(body.get("about"))
+                return self._json({"ok": True})
+            if path == "/api/suggest-kinds":
+                suggest_kinds(body.get("mode"), body.get("kinds"))
+                return self._json({"ok": True})
             if path == "/api/pick":
                 with db.connect() as conn:
                     picks.rate(conn, str(body.get("uid")), body.get("feedback"))

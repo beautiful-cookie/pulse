@@ -24,6 +24,7 @@ const ICONS = {
   layers: '<path d="M12 4l9 5-9 5-9-5zM3 14l9 5 9-5"/>',
   close: '<path d="M6 6l12 12M18 6L6 18"/>',
   trash: '<path d="M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13"/>',
+  target: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><path d="M12 12h.01"/>',
 };
 let topicNames = {};
 let topicOrder = [];
@@ -619,6 +620,105 @@ function pickRow(pick) {
   </article>`;
 }
 
+const SUGGEST_BY = { claude: "отобрал Claude", model: "проверила модель", rules: "по правилам" };
+let suggestKind = "";
+let suggestData = null;
+
+function suggestCard(item, compact = false) {
+  const link = safeUrl(item.link);
+  const external = link.startsWith("http") ? 'target="_blank" rel="noreferrer noopener"' : "";
+  const kind = suggestData?.kinds.find((k) => k.id === item.kind) || SUGGEST_KINDS[item.kind];
+  const when = item.when ? whenLabel(item.when) : null;
+  const head = [kind?.name, item.source, ago(item.published)].filter(Boolean).join(" · ");
+  return `<article class="pick sg ${compact ? "compact" : ""}" data-sg="${esc(item.uid)}">
+    <div class="pick-head"><span>${esc(head)}</span>${when ? `<span class="when ${when.tone}">${item.kind === "events" ? "" : "до "}${esc(when.text)}</span>` : ""}</div>
+    <button class="pick-gist" data-pick-open aria-expanded="false">${esc(item.title)}</button>
+    <div class="pick-why">${esc(item.why)}${compact ? "" : `<span class="sg-by"> · ${esc(SUGGEST_BY[item.by] || "")}</span>`}</div>
+    <div class="pick-full" hidden>${esc(item.body)}</div>
+    <div class="pick-tools">
+      ${link ? `<a class="tool" href="${esc(link)}" ${external} title="Открыть" aria-label="Открыть">${icon("open")}</a>` : ""}
+      <button class="tool" data-sg-task title="В дела: добавить в «Актуальное»${item.when ? " со сроком" : ""}" aria-label="В дела">${icon("task")}</button>
+      <button class="tool ${item.liked ? "on" : ""}" data-sg-rate="1" title="Подходит: похожее будет выше" aria-label="Подходит">${icon("up")}</button>
+      <button class="tool" data-sg-rate="-1" title="Не то: убрать, похожее будет ниже" aria-label="Не то">${icon("down")}</button>
+    </div>
+  </article>`;
+}
+
+const SUGGEST_KINDS = { gigs: { name: "Заказы" }, jobs: { name: "Вакансии" }, events: { name: "События" }, reads: { name: "Материалы" } };
+
+async function loadHomeSuggest() {
+  const box = document.getElementById("home-suggest");
+  if (!box) return;
+  const data = await api("/api/suggest?home=1").catch(() => null);
+  if (!data?.items.length || !document.body.contains(box)) return;
+  box.innerHTML = `<div class="news-label sg-label"><span>Предложка</span><a class="link" href="#suggest">Вся предложка · ${data.total}</a></div>
+    ${data.items.map((item) => suggestCard(item, true)).join("")}`;
+}
+
+function suggestJobLine(job) {
+  if (job.status === "working") return `<span class="busy">${job.engine === "claude" ? "Claude подбирает…" : "Модель проверяет…"}</span>`;
+  if (job.status === "error") return `<span class="bad-text">${esc(job.error)}</span>`;
+  if (job.status === "done") return job.engine === "claude" ? `Claude отобрал ${job.added} из ${job.read} открытых материалов` : `Модель проверила ${job.added}`;
+  return "";
+}
+
+function renderSuggest(data) {
+  suggestData = data;
+  if (suggestKind && !data.kinds.some((k) => k.id === suggestKind && k.on)) suggestKind = "";
+  const items = data.items.filter((item) => !suggestKind || item.kind === suggestKind);
+  const working = data.job.status === "working";
+  const chips = [`<button class="chip" data-sg-kind="" aria-pressed="${!suggestKind}">Все<span>${data.total}</span></button>`,
+    ...data.kinds.filter((k) => k.on).map((k) => `<button class="chip" data-sg-kind="${k.id}" aria-pressed="${suggestKind === k.id}">${esc(k.name)}<span>${k.count}</span></button>`)].join("");
+  const mode = data.modes.find((m) => m.id === data.mode.id);
+  const toggles = data.kinds.map((k) => `<label class="sg-toggle"><input type="checkbox" data-sg-show="${k.id}" ${mode.kinds.includes(k.id) ? "checked" : ""}>${esc(k.name)}</label>`).join("");
+  view.innerHTML = `
+    <header class="top"><h1>Предложка</h1>
+      <div class="modes" role="group" aria-label="Режим внимания">
+        ${data.modes.map((m) => `<button data-mode="${esc(m.id)}" aria-pressed="${m.id === data.mode.id}">${esc(m.name)}</button>`).join("")}
+      </div></header>
+    <div class="sg-bar">
+      <button class="btn" data-sg-run="local" ${working ? "disabled" : ""} aria-label="Подобрать локально" title="Локальная модель проверит лучших кандидатов, включая закрытые группы. Всё остаётся на компьютере">Подобрать локально</button>
+      <button class="btn" data-sg-run="claude" ${working ? "disabled" : ""} aria-label="Подобрать с Claude" title="Claude получит открытые группы, посты каналов и новости за неделю и ваш профиль. Закрытые и личные чаты не уходят">${icon("spark")} Подобрать с Claude</button>
+      <span class="sg-job" id="sg-job">${suggestJobLine(data.job)}</span>
+    </div>
+    <details class="sg-about" ${data.profile ? "" : "open"}>
+      <summary>О себе${data.profile ? "" : ": заполните, и подбор станет точнее"}</summary>
+      <form id="sg-about"><textarea id="sg-about-text" rows="4" placeholder="Навыки, опыт, что ищете: например, «пишу тексты и делаю исследования по нейронауке, ищу удалённые заказы и стажировки»">${esc(data.about)}</textarea>
+      <div class="sg-about-foot"><small class="soft">Правила и локальная модель читают это на компьютере. Claude получает этот текст только по кнопке «Подобрать с Claude» и в окне «Спросить».</small>
+      <button class="btn primary" type="submit">Сохранить</button></div></form>
+    </details>
+    <div class="sg-show"><span>В режиме «${esc(data.mode.name)}» показывать:</span>${toggles}</div>
+    <div class="chips">${chips}</div>
+    <section class="sg-list">${items.map((item) => suggestCard(item)).join("") || `<p class="empty">${data.kinds.some((k) => k.on) ? "Пока ничего подходящего. Выберите больше чатов и каналов или расскажите о себе." : "В этом режиме предложка выключена: отметьте виды выше."}</p>`}</section>`;
+  document.getElementById("sg-about").onsubmit = async (event) => {
+    event.preventDefault();
+    try {
+      await api("/api/suggest-about", { about: document.getElementById("sg-about-text").value });
+      toast("Сохранено. Предложка пересчитана");
+      route();
+    } catch (error) { toast(error.message); }
+  };
+  if (working) waitForSuggest();
+}
+
+async function renderSuggestPage() {
+  const token = routeToken;
+  const data = await api("/api/suggest");
+  if (token === routeToken) renderSuggest(data);
+}
+
+function waitForSuggest() {
+  clearTimeout(waitForSuggest.timer);
+  waitForSuggest.timer = setTimeout(async () => {
+    const job = await api("/api/suggest-run").catch(() => null);
+    if (!job) return;
+    if (job.status === "working") return waitForSuggest();
+    if (job.status === "error") toast(job.error);
+    else toast(job.engine === "claude" ? `Claude добавил в предложку ${job.added}` : `Модель проверила ${job.added}`);
+    if (location.hash.startsWith("#suggest") && isCalm()) route();
+  }, 2000);
+}
+
 function picksBlock(chosen) {
   if (!chosen?.length) return "";
   return `<section class="picks"><div class="news-label">Для вас</div>${chosen.map(pickRow).join("")}</section>`;
@@ -679,6 +779,7 @@ function renderToday(data) {
       <section class="col" id="news-panel">
         <h2 class="sec">Знать<button class="digest-btn" id="digest-btn" type="button" title="Claude соберёт сводку новостей. Чаты в неё не попадают">${icon("spark")}<span>Сводка от Claude</span></button></h2>
         ${picksBlock(data.picks)}
+        <section class="picks" id="home-suggest"></section>
         ${briefBlock(data.brief)}
         <div class="news-head"><span>Новости</span>${topicPicker()}</div>
         <div id="news"></div>
@@ -698,6 +799,7 @@ function renderToday(data) {
   document.getElementById("refresh").onclick = startCollect;
   document.getElementById("digest-btn").onclick = startDigest;
   if (data.running) waitForRun();
+  loadHomeSuggest();
   api("/api/news-digest").then((state) => { if (state.status === "working") watchDigest(); }).catch(() => {});
 }
 
@@ -761,7 +863,7 @@ function waitForRescore() {
   waitForRescore.timer = setTimeout(async () => {
     const status = await api("/api/status").catch(() => null);
     if (status?.rescoring) return waitForRescore();
-    if ((location.hash.slice(1) || "today") === "today" && isCalm()) route();
+    if (["today", "suggest"].includes(location.hash.slice(1) || "today") && isCalm()) route();
   }, 1000);
 }
 
@@ -1268,6 +1370,11 @@ function bindSettings(data) {
 }
 
 view.addEventListener("change", async (event) => {
+  if (event.target.closest("[data-sg-show]")) {
+    const kinds = [...document.querySelectorAll("[data-sg-show]:checked")].map((box) => box.dataset.sgShow);
+    try { await api("/api/suggest-kinds", { mode: suggestData.mode.id, kinds }); route(); } catch (error) { toast(error.message); }
+    return;
+  }
   const levelField = event.target.closest("[data-level-for]");
   if (levelField) {
     try { await api("/api/chat-level", { name: levelField.dataset.levelFor, level: levelField.value }); toast("Важность чата сохранена"); }
@@ -1311,6 +1418,43 @@ view.addEventListener("click", async (event) => {
       await vanish(chatSkip.closest(".do-row"));
       route();
     } catch (error) { toast(error.message); }
+    return;
+  }
+  const sgRate = event.target.closest("[data-sg-rate]");
+  if (sgRate) {
+    const card = sgRate.closest("[data-sg]");
+    const value = Number(sgRate.dataset.sgRate);
+    const liked = value > 0 && !sgRate.classList.contains("on");
+    try {
+      await api("/api/suggest-rate", { uid: card.dataset.sg, feedback: value < 0 ? -1 : liked ? 1 : 0 });
+      if (value < 0) { toast("Убрано. Похожее будет ниже"); await vanish(card); }
+      else { sgRate.classList.toggle("on", liked); if (liked) toast("Учту: похожее будет выше"); }
+    } catch (error) { toast(error.message); }
+    return;
+  }
+  const sgTask = event.target.closest("[data-sg-task]");
+  if (sgTask) {
+    try {
+      await api("/api/suggest-task", { uid: sgTask.closest("[data-sg]").dataset.sg });
+      toast("Добавлено в «Актуальное»");
+      sgTask.closest("[data-sg]").querySelector("[data-sg-rate='1']")?.classList.add("on");
+    } catch (error) { toast(error.message); }
+    return;
+  }
+  const sgRun = event.target.closest("[data-sg-run]");
+  if (sgRun) {
+    try {
+      const job = await api("/api/suggest-run", { engine: sgRun.dataset.sgRun });
+      document.querySelectorAll("[data-sg-run]").forEach((b) => { b.disabled = true; });
+      document.getElementById("sg-job").innerHTML = suggestJobLine(job);
+      waitForSuggest();
+    } catch (error) { toast(error.message); }
+    return;
+  }
+  const sgKind = event.target.closest("[data-sg-kind]");
+  if (sgKind && suggestData) {
+    suggestKind = sgKind.dataset.sgKind;
+    renderSuggest(suggestData);
     return;
   }
   const pickOpen = event.target.closest("[data-pick-open]");
@@ -1448,6 +1592,7 @@ async function route(animate = false) {
     if (name === "feed") await renderFeed(param ? decodeURIComponent(param) : "");
     else if (name === "tasks") await renderTasks();
     else if (name === "analytics") await renderAnalytics();
+    else if (name === "suggest") await renderSuggestPage();
     else if (name === "settings") await renderSettings();
     else {
       const data = await api("/api/today");

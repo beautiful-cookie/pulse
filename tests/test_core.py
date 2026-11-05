@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pulse import agenda, analysis, assistant, autostart, claude_ai, claude_ask, db, deadlines, digest, feeds, interests, learning, local_ai, mcp_server, notify, obsidian, picks, pipeline, promises, remote, replies, summaries, telegram
+from pulse import agenda, analysis, assistant, autostart, claude_ai, claude_ask, db, deadlines, digest, feeds, interests, learning, local_ai, mcp_server, notify, obsidian, picks, pipeline, promises, remote, replies, suggest, summaries, telegram
 from pulse.config import DEFAULT_CONFIG, active_mode
 from pulse.text import extract_due, keyword_regex, stem
 
@@ -2244,6 +2244,97 @@ class Connector(unittest.TestCase):
         with patch.object(mcp_server, "load_config", lambda: allowed):
             names = {t["name"] for t in mcp_server.handle({"method": "tools/list"})["tools"]}
         self.assertEqual(names, {"pulse_today", "tg_list_chats", "tg_read_messages", "tg_search"})
+
+
+
+class Suggestions(unittest.TestCase):
+    def setUp(self):
+        suggest._cache.update(key=None, value=None)
+        self.conn = memory_db()
+        self.add("tg--100-1", "Фриланс: тексты", "Нужен исполнитель: 5 статей по психологии, бюджет 10 000, сдать до 20 ноября",
+                 "https://t.me/freelance_texts/1", "группа")
+        self.add("tg--200-1", "Закрытая группа", "Ищем в команду исследователя по нейронауке, удалённая работа, зарплата по договорённости",
+                 "https://t.me/c/200/1", "группа")
+        self.add("tg--300-1", "Клуб", "Приглашаем на лекцию о сознании и памяти, регистрация по ссылке", "https://t.me/club_open/1", "группа")
+        self.add("tg-7-1", "Вера Смирнова", "Нужен исполнитель для статьи по психологии, бюджет есть", "https://t.me/vera/1", "личный")
+        self.add("tg--400-1", "Флуд", "Кто-нибудь знает, где купить хороший кофе рядом с метро, очень нужно сегодня", "https://t.me/flood/1", "группа")
+        self.cfg = {"claude": {"enabled": True, "model": "haiku", "digest_model": "sonnet", "profile": "Пишу статьи по психологии, изучаю нейронауку"},
+                    "privacy": {}, "interests": {"about": ["сознание"], "watch": []}, "topics": [], "modes": DEFAULT_CONFIG["modes"],
+                    "active_mode": "all"}
+
+    def add(self, uid, source, body, url, kind):
+        db.upsert_item(self.conn, {"uid": uid, "kind": "message", "source_type": "tg_private", "source_name": source, "title": body[:60],
+                                   "body": body, "author": "Автор", "url": url, "published": db.now_iso(), "meta": {"chat_id": 1, "chat_kind": kind}})
+
+    def uids(self, cfg=None):
+        return [s["uid"] for s in suggest.view(self.conn, cfg or self.cfg)["items"]]
+
+    def test_kinds_by_rules(self):
+        self.assertEqual(suggest.kind_of("Нужен исполнитель, бюджет 5000", "Чат"), "gigs")
+        self.assertEqual(suggest.kind_of("Ищем в команду аналитика, зарплата 100к", "Чат"), "jobs")
+        self.assertEqual(suggest.kind_of("Приглашаем на семинар", "Чат"), "events")
+        self.assertEqual(suggest.kind_of("Новый препринт на arXiv", "Канал"), "reads")
+        self.assertEqual(suggest.kind_of("Привет всем", "Удалённая работа и вакансии"), "jobs")
+        self.assertIsNone(suggest.kind_of("Привет всем", "Флуд"))
+
+    def test_matches_profile_and_skips_personal_and_offtopic(self):
+        found = {s["uid"]: s for s in suggest.view(self.conn, self.cfg)["items"]}
+        self.assertEqual(set(found), {"tg--100-1", "tg--200-1", "tg--300-1"})
+        self.assertEqual(found["tg--100-1"]["why"], "совпадает с вашим профилем: психологии")
+        self.assertEqual(found["tg--100-1"]["kind"], "gigs")
+        self.assertTrue(found["tg--100-1"]["when"].endswith("-11-20"))
+
+    def test_modes_change_kinds(self):
+        rest = dict(self.cfg, active_mode="rest")
+        self.assertEqual(self.uids(rest), ["tg--300-1"])  # в отдыхе работа скрыта
+        cfg = suggest.set_kinds(json.loads(json.dumps(rest)), "rest", ["gigs"])
+        self.assertEqual(self.uids(cfg), ["tg--100-1"])
+        with self.assertRaises(ValueError):
+            suggest.set_kinds(cfg, "нет", [])
+
+    def test_not_that_hides_and_like_lifts(self):
+        suggest.rate(self.conn, "tg--200-1", -1)
+        self.assertNotIn("tg--200-1", self.uids())
+        suggest.rate(self.conn, "tg--300-1", 1)
+        self.assertEqual(self.uids()[0], "tg--300-1")
+
+    def test_claude_gets_only_open_material(self):
+        prompt, refs = suggest.claude_prompt(self.conn, self.cfg)
+        self.assertIn("5 статей по психологии", prompt)
+        self.assertIn("Пишу статьи по психологии", prompt)
+        for secret in ("исследователя по нейронауке", "Нужен исполнитель для статьи"):
+            self.assertNotIn(secret, prompt)
+        self.assertNotIn("tg--200-1", {r["uid"] for r in refs})
+        self.assertNotIn("tg-7-1", {r["uid"] for r in refs})
+
+    def test_claude_picks_are_saved_and_shown_first(self):
+        _, refs = suggest.claude_prompt(self.conn, self.cfg)
+        number = next(i for i, r in enumerate(refs, 1) if r["uid"] == "tg--300-1")
+        answer = f"Вот:\n[{number}] | событие | лекция о сознании, ваш интерес\n[99] | заказ | нет такого\n[{number}] | событие | дубль"
+        with patch.object(suggest.db, "connect", lambda: nullcontext(self.conn)), \
+                patch.object(suggest.claude_ai, "run", lambda *a, **k: answer):
+            self.assertEqual(suggest.refresh_with_claude(self.cfg), {"added": 1, "read": len(refs)})
+        first = suggest.view(self.conn, self.cfg)["items"][0]
+        self.assertEqual((first["uid"], first["by"], first["why"]), ("tg--300-1", "claude", "лекция о сознании, ваш интерес"))
+
+    def test_local_model_check(self):
+        answers = iter(["ВИД: заказ\nПОДХОДИТ: да\nПОЧЕМУ: статьи по психологии", "ВИД: другое\nПОДХОДИТ: да\nПОЧЕМУ: -"]
+                       + ["ВИД: событие\nПОДХОДИТ: нет"] * 5)
+        with patch.object(suggest.local_ai, "ask", lambda *a, **k: next(answers)):
+            self.assertEqual(suggest.process(self.conn, self.cfg, {}, "m"), 3)
+        self.assertFalse(suggest.has_work(self.conn, self.cfg))
+        self.assertEqual(self.uids(), ["tg--100-1"])
+        self.assertEqual(suggest.view(self.conn, self.cfg)["items"][0]["why"], "статьи по психологии")
+
+    def test_one_job_at_a_time(self):
+        suggest._job.update(status="working")
+        try:
+            with self.assertRaises(LookupError):
+                suggest.start(self.cfg, "claude")
+        finally:
+            suggest._job.update(status="idle")
+        with self.assertRaises(ValueError):
+            suggest.start(self.cfg, "gpt")
 
 
 if __name__ == "__main__":

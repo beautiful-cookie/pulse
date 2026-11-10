@@ -70,7 +70,10 @@ document.querySelectorAll("[data-icon]").forEach((el) => el.insertAdjacentHTML("
 
 async function api(path, body) {
   const options = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
-  const response = await fetch(path, options);
+  let response;
+  try { response = await fetch(path, options); } catch {
+    throw new Error("Пульс не отвечает. Если окно Пульса закрыто, запустите start.bat и обновите страницу");
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || `Ошибка ${response.status}`);
   return data;

@@ -2175,6 +2175,9 @@ class Folders(unittest.TestCase):
         people = self.folder(rules={"contacts"})
         self.assertTrue(telegram.in_folder(people, self.dialog(8, kind="личный", contact=True)))
         self.assertFalse(telegram.in_folder(people, self.dialog(9, kind="личный")))
+        everything = self.folder(rules={"contacts", "non_contacts", "groups", "broadcasts", "bots"})
+        self.assertFalse(telegram.in_folder(everything, self.dialog(10, kind="избранное")), "Избранное не роняет полное обновление")
+        self.assertTrue(telegram.in_folder(self.folder(include={10}), self.dialog(10, kind="избранное")))
 
     def test_all_dialogs_and_folders_are_saved(self):
         class Client:

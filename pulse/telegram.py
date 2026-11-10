@@ -290,7 +290,8 @@ def in_folder(folder, dialog):
     kind = dialog["kind"]
     if kind == "личный":
         return ("contacts" in rules and dialog["contact"]) or ("non_contacts" in rules and not dialog["contact"])
-    return {"группа": "groups", "канал": "broadcasts", "бот": "bots"}[kind] in rules
+    # Избранное под правила папок не подпадает: оно в папке, только если добавлено в неё явно
+    return {"группа": "groups", "канал": "broadcasts", "бот": "bots"}.get(kind) in rules
 
 
 async def save_dialogs(client):

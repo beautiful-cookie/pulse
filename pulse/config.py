@@ -54,7 +54,7 @@ DEFAULT_CONFIG = {
             "culture": 1.5, "world": 1.0, "startups": 0.5, "career": 0.5, "study": 0.3}},
     ],
     "remote": {"enabled": False, "key": ""},
-    "deadlines": {"auto_add": True, "max_per_run": 5},
+    "deadlines": {"auto_add": True, "max_per_run": 5, "promises": True, "saved": True},
     "claude": {"enabled": True, "model": "haiku", "digest_model": "sonnet"},
     "blacklist": [
         "тренды года", "топ-10", "как заработать", "бесплатный вебинар",

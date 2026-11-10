@@ -1063,7 +1063,9 @@ function privacyBody(data) {
     <label class="switch plain"><input type="checkbox" id="auto-deadlines" ${draft.deadlines.auto_add ? "checked" : ""}>
       <span>Добавлять сроки из чатов в «Актуальное»<small class="soft">Раздел «Сроки из чатов». Его могут прочитать сессии Claude, которые открывают хранилище</small></span></label>
     <label class="switch plain"><input type="checkbox" id="auto-promises" ${draft.deadlines.promises !== false ? "checked" : ""}>
-      <span>Находить мои обещания в чатах<small class="soft">«Скину завтра» и подобное попадает в дела. Раздел тот же</small></span></label>
+      <span>Находить дела в моих сообщениях<small class="soft">«Скину завтра» в чатах и «купить билеты» в Избранном попадают в дела. Раздел тот же, сообщения хранятся только на компьютере</small></span></label>
+    <label class="switch plain"><input type="checkbox" id="saved-messages" ${draft.deadlines.saved !== false ? "checked" : ""}>
+      <span>Читать Избранное Telegram<small class="soft">Записи себе становятся делами, если похожи на них. Отдельно выбирать Избранное в списке чатов не нужно</small></span></label>
     <label class="switch plain"><input type="checkbox" id="claude-public" ${draft.privacy.claude_public_chats !== false ? "checked" : ""}>
       <span>Отвечать Claude по открытым группам<small class="soft">Только группы с публичной ссылкой t.me: их читает любой без вступления. Галочкой ниже можно закрыть любую</small></span></label>
     ${openChatsList(data)}
@@ -1243,6 +1245,7 @@ function readSimpleFields() {
   draft.full_collect_hour = Number(document.getElementById("full-hour").value);
   draft.notify.enabled = document.getElementById("notify-on").checked;
   draft.deadlines.promises = document.getElementById("auto-promises").checked;
+  draft.deadlines.saved = document.getElementById("saved-messages").checked;
   draft.interests.about = document.getElementById("about").value.split("\n").map((s) => s.trim()).filter(Boolean);
   draft.me.names = splitList(document.getElementById("names").value);
   draft.blacklist = splitList(document.getElementById("blacklist").value);

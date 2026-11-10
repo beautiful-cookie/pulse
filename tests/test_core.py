@@ -1516,7 +1516,7 @@ class AnsweredBefore(unittest.TestCase):
         db.kv_set(conn, "tg_my_last", {"5": 0})
         seen = {}
 
-        async def collect_async(client, chats, cursors, asked, full=False):
+        async def collect_async(client, chats, cursors, asked, full=False, saved=False):
             seen["asked"] = set(asked)
             return [(chats[0], [], 100, 77, None)]
 
@@ -1685,7 +1685,7 @@ class QuickCollect(unittest.TestCase):
         items, newest, _ = asyncio.run(telegram.fetch_chat(Client(), {"id": 1, "name": "А", "kind": "группа"}, None))
         self.assertEqual((items, newest), ([], 50))
 
-    def test_my_promise_is_kept_as_private_outgoing(self):
+    def test_my_messages_are_kept_as_private_outgoing(self):
         now = datetime.now(timezone.utc)
 
         class Client:
@@ -1698,7 +1698,7 @@ class QuickCollect(unittest.TestCase):
                     yield SimpleNamespace(id=59, date=now, out=True, message="Ок")
                 return run()
         items, _, my_last = asyncio.run(telegram.fetch_chat(Client(), {"id": 1, "name": "Вера", "kind": "личный"}, 1))
-        self.assertEqual([(i["kind"], i["source_type"]) for i in items], [("outgoing", "tg_private")])
+        self.assertEqual([(i["kind"], i["source_type"]) for i in items], [("outgoing", "tg_private")] * 2)
         self.assertEqual(my_last, 60)
 
 
@@ -1736,6 +1736,40 @@ class Promises(unittest.TestCase):
             text = note.read_text("utf-8")
         self.assertIn(f"### {agenda.CHAT_SECTION}", text)
         self.assertIn("Обещание: Скину отчёт завтра · Вера", text)
+
+    def note(self, conn, uid, body, chat_kind="избранное", source="Избранное", forwarded=False):
+        db.upsert_item(conn, {"uid": uid, "kind": "outgoing", "source_type": "tg_private", "source_name": source, "title": body, "body": body,
+                              "published": db.now_iso(), "meta": {"chat_id": 9, "chat_kind": chat_kind, "forwarded": forwarded}})
+
+    def test_kinds_of_own_messages(self):
+        self.assertEqual(promises.classify("Скину отчёт завтра", False, False), "promise")
+        self.assertEqual(promises.classify("Купить билеты в Казань", True, False), "note")
+        self.assertEqual(promises.classify("- [ ] позвонить в деканат\n- найти справку", True, False), "note")
+        self.assertEqual(promises.classify("Не забыть про справку для военкомата", True, False), "note")
+        self.assertIsNone(promises.classify("Купить билеты в Казань", True, True))  # пересланное не ваше дело
+        self.assertIsNone(promises.classify("Интересная мысль про память и сны", True, False))
+        self.assertEqual(promises.classify("Посмотрю твой текст", False, False), "maybe")
+        self.assertEqual(promises.classify("Мне надо закончить главу", False, False), "maybe")
+        self.assertIsNone(promises.classify("Купить билеты в Казань", False, False))
+        self.assertIsNone(promises.classify("Ну ты конечно преувеличил", False, False))
+
+    def test_saved_notes_become_tasks_and_unsure_waits_for_model(self):
+        conn = memory_db()
+        self.note(conn, "tg-9-1", "Купить билеты в Казань до 20 ноября")
+        self.note(conn, "tg-9-2", "Интересная мысль про память и сны")
+        self.note(conn, "tg-5-1", "Посмотрю твой текст", chat_kind="личный", source="Вера")
+        self.assertEqual([(m["kind"], m["due"][5:]) for m in promises.candidates(conn, date.today(), with_model=False)], [("note", "11-20")])
+        self.assertEqual({m["uid"] for m in promises.candidates(conn, date.today())}, {"tg-9-1", "tg-5-1"})
+        with TemporaryDirectory() as folder:
+            note = Path(folder) / "Актуальное.md"
+            note.write_text("Сделать сейчас\n\n### Прочее\n", "utf-8")
+            cfg = {"vault": folder, "obsidian": {"agenda_notes": ["Актуальное.md"]}, "tg_private": [], "deadlines": {"auto_add": True, "max_per_run": 5}}
+            answers = iter(["ДЕЛО: да\nЗАДАЧА: Купить билеты в Казань", "ДЕЛО: да\nЗАДАЧА: Посмотреть текст Веры"])
+            with patch.object(agenda, "backup", lambda path: None), patch.object(local_ai, "ask", lambda *a, **k: next(answers)):
+                self.assertEqual(promises.process(conn, cfg, {}, "m"), 2)
+            text = note.read_text("utf-8")
+        self.assertIn("Себе: Купить билеты в Казань", text)
+        self.assertIn("Обещание: Посмотреть текст Веры · Вера", text)
 
     def test_can_be_switched_off(self):
         conn = memory_db()

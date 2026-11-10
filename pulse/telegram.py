@@ -12,10 +12,11 @@ from datetime import datetime, timedelta, timezone
 
 from . import db
 from .config import DATA, TG_CREDS_PATH, TG_DIALOGS_PATH, TG_FOLDERS_PATH, TG_QR_PAGE_PATH, TG_SESSION_PATH
-from .promises import is_promise
+from .promises import SAVED_KIND
 from .text import first_line_title
 
 BACKFILL_DAYS = 3
+SAVED_NAME = "Избранное"
 PER_CHAT_LIMIT = 300
 REPLY_LOOKUP_DEPTH = 300
 QUICK_DIALOGS = 100  # диалоги идут от свежих к старым: новое всегда в начале списка
@@ -298,8 +299,10 @@ async def save_dialogs(client):
     tops = {}
     async for dialog in client.iter_dialogs():
         tops[str(dialog.id)] = dialog.message.id if dialog.message else 0
+        is_self = bool(getattr(dialog.entity, "is_self", False))
         dialogs.append({
-            "id": dialog.id, "name": dialog.name or "Без названия", "kind": chat_kind(dialog),
+            "id": dialog.id, "name": SAVED_NAME if is_self else dialog.name or "Без названия",
+            "kind": SAVED_KIND if is_self else chat_kind(dialog),
             "unread": dialog.unread_count,
             "last": dialog.date.isoformat() if dialog.date else None,
             "archived": bool(dialog.archived), "contact": bool(getattr(dialog.entity, "contact", False)),
@@ -365,6 +368,7 @@ def message_to_item(chat, entity, message, sender_name, outgoing=False):
             "chat_id": chat["id"], "chat_kind": chat.get("kind", "группа"),
             "mentioned": bool(getattr(message, "mentioned", False)),
             "is_reply": bool(getattr(message, "is_reply", False)),
+            "forwarded": bool(getattr(message, "fwd_from", None)),
             "chat_weight": chat.get("weight", 1.0),
         },
     }
@@ -407,7 +411,7 @@ async def fetch_chat(client, chat, last_id, needs_lookup=False):
         text = (message.message or "").strip()
         if message.out:
             my_last = max(my_last, message.id)
-            if chat.get("kind") != "канал" and is_promise(text):
+            if chat.get("kind") != "канал" and text:  # ваши сообщения нужны для дел, хранятся только здесь
                 items.append(message_to_item(chat, entity, message, "", outgoing=True))
             continue
         if not text:
@@ -415,7 +419,7 @@ async def fetch_chat(client, chat, last_id, needs_lookup=False):
         sender = await message.get_sender()
         items.append(message_to_item(chat, entity, message, sender_label(sender)))
     # Сбор идёт от прошлой точки: ответ, отправленный раньше неё, здесь не увидеть
-    if needs_lookup and chat.get("kind") != "канал":
+    if needs_lookup and chat.get("kind") not in ("канал", SAVED_KIND):
         private = chat.get("kind") in ("личный", "бот")
         my_last = max(my_last, await my_last_message(client, entity, private))
         return items, newest, my_last
@@ -430,13 +434,16 @@ def has_news(chat_id, tops, cursors, asked):
     return tops.get(key, 0) > cursors[key]
 
 
-async def collect_async(client, chats, cursors, asked=(), full=False):
+async def collect_async(client, chats, cursors, asked=(), full=False, saved=False):
     results = []
     await client.connect()
     try:
         if not await client.is_user_authorized():
             raise RuntimeError("сессия недействительна, нужен повторный вход")
         tops = await save_dialogs(client) if full else await read_tops(client, QUICK_DIALOGS)
+        if saved:  # Избранное это диалог с самим собой, его id равен вашему
+            me = await client.get_me()
+            chats = [c for c in chats if c["id"] != me.id] + [{"id": me.id, "name": SAVED_NAME, "kind": SAVED_KIND}]
         for chat in chats:
             if not full and not has_news(chat["id"], tops, cursors, asked):
                 continue
@@ -460,7 +467,7 @@ def collect(conn, cfg, full=False):
     my_last_seen = db.kv_get(conn, "tg_my_last", {})
     asked = set(db.kv_get(conn, "tg_replies_asked", []))
     try:
-        results = asyncio.run(collect_async(make_client(), chats, cursors, asked, full))
+        results = asyncio.run(collect_async(make_client(), chats, cursors, asked, full, cfg.get("deadlines", {}).get("saved", True)))
     except Exception as error:
         db.record_source(conn, "tg_private", "Telegram: аккаунт", "tg_private", error=f"{type(error).__name__}: {str(error)[:160]}")
         return 0

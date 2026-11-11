@@ -25,6 +25,10 @@ const ICONS = {
   close: '<path d="M6 6l12 12M18 6L6 18"/>',
   trash: '<path d="M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13"/>',
   target: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><path d="M12 12h.01"/>',
+  calendar: '<rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/>',
+  left: '<path d="M15 6l-6 6 6 6"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  search: '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/>',
 };
 let topicNames = {};
 let topicOrder = [];
@@ -214,6 +218,7 @@ async function completeTask(id, row) {
   try {
     const result = await taskRequest({ action: "done", line: task.meta.line, raw: task.meta.raw, done: true });
     await vanish(row);
+    if (row?.classList.contains("kcard")) route();
     toast("Готово и отмечено в Obsidian", "Отменить", async () => {
       await taskRequest({ action: "done", line: result.line, raw: result.raw, done: false });
       route();
@@ -224,14 +229,14 @@ async function completeTask(id, row) {
   }
 }
 
-async function addTask(input, dateInput) {
+async function addTask(input, dateInput, status) {
   const text = input.value.trim();
   if (!text) return;
   try {
-    await taskRequest({ action: "add", text, due: dateInput?.value || null });
+    const result = await taskRequest({ action: "add", text, due: dateInput?.value || null, parse: true, status: status || " " });
     input.value = "";
     if (dateInput) dateInput.value = "";
-    toast("Добавлено в «Актуальное»");
+    toast(result.due ? `Добавлено, срок: ${dueText(result.due).text}` : "Добавлено в «Актуальное»");
     route();
   } catch (error) { toast(error.message); }
 }
@@ -241,55 +246,260 @@ function editableText(task) {
 }
 
 const COLUMNS = [
-  { status: " ", title: "Сделать" },
-  { status: "/", title: "В работе" },
-  { status: "w", title: "Жду" },
-  { status: "x", title: "Готово" },
+  { status: " ", key: "todo", title: "Сделать" },
+  { status: "/", key: "/", title: "В работе" },
+  { status: "w", key: "w", title: "Жду" },
+  { status: "x", key: "x", title: "Готово" },
 ];
+const BUCKETS = [["overdue", "Просрочено"], ["today", "Сегодня"], ["week", "На неделе"], ["later", "Позже"], ["none", "Без срока"]];
+const FILTERS = [["all", "Все"], ["soon", "Срочные"], ["chat", "Из чатов"], ["self", "Себе"], ["none", "Без срока"]];
+const DONE_PREVIEW = 4;
+const board = { data: null, q: "", only: "all", doneOpen: false, adding: null };
 
 function dueRank(task) {
   return task.due || "9999";
 }
 
+function bucketOf(task) {
+  if (!task.due) return "none";
+  const diff = dayDiff(task.due);
+  if (diff < 0) return "overdue";
+  if (diff === 0) return "today";
+  return diff <= 7 ? "week" : "later";
+}
+
+function dueText(iso) {
+  const diff = dayDiff(iso);
+  const date = new Date(`${iso}T00:00:00`);
+  const short = date.toLocaleDateString("ru-RU", { day: "numeric", month: "short" }).replace(".", "");
+  if (diff < 0) return { text: `просрочено ${-diff} дн`, tone: "bad" };
+  if (diff === 0) return { text: "сегодня", tone: "bad" };
+  if (diff === 1) return { text: "завтра", tone: "warn" };
+  if (diff < 7) return { text: `${date.toLocaleDateString("ru-RU", { weekday: "short" })}, ${short}`, tone: "warn" };
+  return { text: short, tone: "" };
+}
+
+const isSelfNote = (task) => /^(Себе|Обещание):/.test(task.title);
+
+function matchesBoard(task) {
+  const q = board.q.trim().toLowerCase();
+  if (q && !`${task.title} ${task.meta.context || ""} ${task.source_name || ""}`.toLowerCase().includes(q)) return false;
+  if (board.only === "soon") return ["overdue", "today", "week"].includes(bucketOf(task));
+  if (board.only === "chat") return isFromChat(task);
+  if (board.only === "self") return isSelfNote(task);
+  if (board.only === "none") return !task.due;
+  return true;
+}
+
+function dueChip(task) {
+  const when = task.due ? dueText(task.due) : null;
+  return `<button class="due-chip ${when ? when.tone : "empty"}" data-due-menu="${task.id}" title="Срок" aria-haspopup="menu">
+    ${icon("calendar")}<span>${when ? esc(when.text) : "срок"}</span></button>`;
+}
+
 function card(task) {
   remember(task);
-  const when = task.due ? whenLabel(task.due) : null;
-  const chatTag = isFromChat(task) ? `<span class="tag reply">${icon("chat")}из чата</span>` : "";
+  const when = task.due ? dueText(task.due) : null;
+  const tag = isFromChat(task) ? `<span class="tag reply">${icon("chat")}из чата</span>` : "";
   if (!task.editable) {
-    return `<article class="kcard locked"><a class="kcard-title" href="${esc(safeUrl(task.url))}">${esc(taskTitle(task))}</a>
-      <div class="kcard-foot"><span class="kcard-sub">${esc(task.source_name)}</span>${when ? `<span class="when ${when.tone}">${esc(when.text)}</span>` : ""}</div></article>`;
+    return `<article class="kcard locked"><span class="kcheck ghost" title="Эта задача в другой заметке, отметить её можно в Obsidian"></span>
+      <div class="kcard-main"><a class="kcard-title" href="${esc(safeUrl(task.url))}">${esc(taskTitle(task))}</a>
+      <div class="kcard-meta">${when ? `<span class="due-chip ${when.tone}">${icon("calendar")}<span>${esc(when.text)}</span></span>` : ""}<span class="kcard-sub">${esc(task.source_name)}</span></div></div></article>`;
   }
+  const status = task.meta.status || " ";
+  const index = COLUMNS.findIndex((c) => c.status === status);
+  const prev = COLUMNS[index - 1];
+  const next = COLUMNS[index + 1];
+  const remove = isFromChat(task)
+    ? `<button class="tool" data-reject="${task.id}" title="Не дело: убрать и больше не добавлять" aria-label="Убрать">${icon("trash")}</button>`
+    : `<button class="tool" data-delete="${task.id}" title="Удалить из «Актуального»" aria-label="Удалить">${icon("trash")}</button>`;
   return `<article class="kcard ${when?.tone === "bad" ? "urgent" : ""}" draggable="true" data-card="${task.id}">
-    <button class="task-text kcard-title" data-edit="${task.id}" title="Изменить">${esc(taskTitle(task))}</button>
-    ${task.meta.context ? `<div class="kcard-sub">${esc(task.meta.context)}</div>` : ""}
-    <div class="kcard-foot">
-      ${chatTag}
-      <input type="date" class="task-date ${when ? when.tone : "no-date"}" data-due="${task.id}" value="${esc(task.due || "")}" aria-label="Срок">
-      <select class="move" data-move="${task.id}" aria-label="Перенести в колонку">
-        ${COLUMNS.map((c) => `<option value="${c.status === " " ? "todo" : c.status}" ${c.status === (task.meta.status || " ") ? "selected" : ""}>${c.title}</option>`).join("")}
-      </select>
-      ${isFromChat(task) ? `<button class="tool" data-reject="${task.id}" title="Не срок: убрать и больше не добавлять" aria-label="Не срок">${icon("close")}</button>`
-        : `<button class="tool" data-delete="${task.id}" title="Удалить" aria-label="Удалить">${icon("trash")}</button>`}
+    <button class="kcheck" data-kdone="${task.id}" title="Готово" aria-label="Готово: ${esc(taskTitle(task))}">${icon("check")}</button>
+    <div class="kcard-main">
+      <button class="task-text kcard-title" data-edit="${task.id}" title="Изменить текст">${esc(taskTitle(task))}</button>
+      ${task.meta.context ? `<div class="kcard-sub">${esc(task.meta.context)}</div>` : ""}
+      <div class="kcard-meta">${dueChip(task)}${tag}</div>
+    </div>
+    <div class="kcard-tools">
+      ${prev ? `<button class="tool" data-shift="${task.id}" data-to="${prev.key}" title="В «${prev.title}»" aria-label="В колонку ${prev.title}">${icon("left")}</button>` : ""}
+      ${next ? `<button class="tool" data-shift="${task.id}" data-to="${next.key}" title="В «${next.title}»" aria-label="В колонку ${next.title}">${icon("chev")}</button>` : ""}
+      ${remove}
     </div>
   </article>`;
 }
 
 function doneCard(task, index) {
   doneIndex[index] = task;
-  return `<article class="kcard done" draggable="true" data-done-card="${index}"><span class="kcard-title">${esc(task.title)}</span>
-    <div class="kcard-foot"><button class="linkish" data-reopen="${index}">Вернуть</button></div></article>`;
+  return `<article class="kcard done" draggable="true" data-done-card="${index}">
+    <button class="kcheck on" data-reopen="${index}" title="Вернуть в «Сделать»" aria-label="Вернуть: ${esc(task.title)}">${icon("check")}</button>
+    <div class="kcard-main"><span class="kcard-title">${esc(task.title)}</span></div></article>`;
 }
 
-function kanban(data) {
-  const open = [...data.tasks].sort((x, y) => dueRank(x).localeCompare(dueRank(y)));
+function columnBody(column, rows) {
+  if (column.status === "x") {
+    const shown = board.doneOpen ? rows : rows.slice(0, DONE_PREVIEW);
+    const more = rows.length - shown.length;
+    return shown.map((t) => doneCard(t, rows.indexOf(t))).join("")
+      + (more > 0 ? `<button class="kcol-more" data-done-more>Ещё ${more}</button>` : "")
+      + (board.doneOpen && rows.length > DONE_PREVIEW ? '<button class="kcol-more" data-done-more>Свернуть</button>' : "");
+  }
+  if (column.status !== " " || rows.length < 4) return rows.map(card).join("");
+  return BUCKETS.map(([key, title]) => {
+    const part = rows.filter((t) => bucketOf(t) === key);
+    return part.length ? `<div class="kgroup is-${key}"><span>${title}</span><span>${part.length}</span></div>${part.map(card).join("")}` : "";
+  }).join("");
+}
+
+function addForm(column) {
+  return board.adding === column.key ? `<form class="kcol-add" data-col-form="${column.key}">
+    <input placeholder="Задача, срок можно в конце: «в пятницу»" aria-label="Новая задача в колонку ${column.title}" autocomplete="off">
+  </form>` : "";
+}
+
+function kanban() {
+  const data = board.data;
+  const open = data.tasks.filter(matchesBoard).sort((x, y) => dueRank(x).localeCompare(dueRank(y)));
+  const done = board.q ? data.done.filter((t) => t.title.toLowerCase().includes(board.q.trim().toLowerCase())) : data.done;
   return `<div class="kanban">${COLUMNS.map((column) => {
-    const rows = column.status === "x" ? data.done : open.filter((t) => (t.meta.status || " ") === column.status);
-    const cards = column.status === "x" ? rows.map(doneCard).join("") : rows.map(card).join("");
-    return `<section class="kcol" data-column="${column.status === " " ? "todo" : column.status}">
-      <div class="kcol-head">${esc(column.title)}<span>${rows.length}</span></div>
-      <div class="kcol-body">${cards || '<p class="kcol-empty">Перетащите сюда</p>'}</div></section>`;
+    const rows = column.status === "x" ? done : open.filter((t) => (t.meta.status || " ") === column.status);
+    const body = columnBody(column, rows);
+    const empty = column.status === "x" ? "Отметьте задачу кружком, и она окажется здесь"
+      : board.q || board.only !== "all" ? "Ничего не подошло" : "Перетащите сюда карточку";
+    return `<section class="kcol ${column.key === "x" ? "kcol-done" : ""}" data-column="${column.key}" style="--col:var(--col-${column.key === "todo" ? "todo" : column.key === "/" ? "doing" : column.key === "w" ? "wait" : "done"})">
+      <div class="kcol-head"><span class="kcol-dot"></span><span class="kcol-title">${esc(column.title)}</span><span class="kcol-count">${rows.length}</span>
+        ${column.status === "x" ? "" : `<button class="tool kcol-plus" data-col-add="${column.key}" title="Добавить в «${column.title}»" aria-label="Добавить в колонку ${column.title}">${icon("plus")}</button>`}</div>
+      ${addForm(column)}
+      <div class="kcol-body">${body || `<p class="kcol-empty">${empty}</p>`}</div></section>`;
   }).join("")}</div>`;
 }
+
+function boardFilters() {
+  const count = (key) => board.data.tasks.filter((t) => {
+    const saved = board.only;
+    board.only = key;
+    const ok = matchesBoard(t);
+    board.only = saved;
+    return ok;
+  }).length;
+  return FILTERS.map(([key, title]) => `<button class="kfilter" data-board-only="${key}" aria-pressed="${board.only === key}">${title}<span>${count(key)}</span></button>`).join("");
+}
+
+function paintBoard() {
+  document.getElementById("board-filters").innerHTML = boardFilters();
+  document.getElementById("board").innerHTML = kanban();
+  const form = view.querySelector("[data-col-form] input");
+  if (form) form.focus();
+}
+
+async function renderTasks() {
+  const token = routeToken;
+  const data = await api("/api/tasks");
+  if (token !== routeToken) return;
+  board.data = data;
+  const stale = data.stale.length ? `<details class="group"><summary>Возможно, устарело<span class="count">${data.stale.length}</span>${icon("chev", "chev")}</summary>
+    <div class="group-body"><p class="empty">Эти строки давно не менялись. Удалите лишнее или верните в работу, поставив срок в Obsidian.</p>${data.stale.map((t) => { remember(t); return `<div class="stale-row"><span>${esc(taskTitle(t))}</span><small>${esc(t.reasons[0] || "")}</small><button class="tool" data-delete="${t.id}" title="Удалить" aria-label="Удалить">${icon("trash")}</button></div>`; }).join("")}</div></details>` : "";
+  const keepQuery = document.getElementById("board-search")?.value ?? board.q;
+  view.innerHTML = `
+    <header class="top"><h1>Дела</h1><div class="top-right"><span>«Актуальное» в Obsidian</span></div></header>
+    <form class="task-add" id="task-add">
+      ${icon("plus")}
+      <input id="task-new" placeholder="Новая задача, например «Сдать эссе в пятницу»" title="Срок можно написать в конце: «завтра», «в пятницу», «до 15.11», «через 3 дня»" aria-label="Новая задача" autocomplete="off">
+      <input id="task-new-date" type="date" aria-label="Срок" title="Или выберите дату">
+      <button class="btn primary" type="submit">Добавить</button>
+    </form>
+    <div class="board-bar">
+      <div class="kfilters" id="board-filters" role="group" aria-label="Показать"></div>
+      <label class="board-search">${icon("search")}<input id="board-search" type="search" placeholder="Найти" value="${esc(keepQuery)}" aria-label="Найти задачу"></label>
+    </div>
+    <div id="board"></div>
+    <div class="stack">${stale}</div>`;
+  board.q = keepQuery;
+  paintBoard();
+  document.getElementById("task-add").onsubmit = (event) => {
+    event.preventDefault();
+    addTask(document.getElementById("task-new"), document.getElementById("task-new-date"));
+  };
+  document.getElementById("board-search").oninput = (event) => {
+    board.q = event.target.value;
+    paintBoard();
+  };
+}
+
+function nextWeekday(target) {
+  const day = new Date(); day.setHours(0, 0, 0, 0);
+  const shift = ((target - day.getDay() + 7) % 7) || 7;
+  day.setDate(day.getDate() + shift);
+  return day;
+}
+
+function isoDay(day) {
+  return `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
+}
+
+function plusDays(n) {
+  const day = new Date(); day.setHours(0, 0, 0, 0);
+  day.setDate(day.getDate() + n);
+  return day;
+}
+
+function closeDueMenu() {
+  document.getElementById("due-menu")?.remove();
+}
+
+function openDueMenu(button) {
+  closeDueMenu();
+  const task = taskIndex[button.dataset.dueMenu];
+  const options = [
+    ["Сегодня", isoDay(plusDays(0))], ["Завтра", isoDay(plusDays(1))],
+    ["В пятницу", isoDay(nextWeekday(5))], ["В понедельник", isoDay(nextWeekday(1))], ["Через неделю", isoDay(plusDays(7))],
+  ];
+  const menu = document.createElement("div");
+  menu.id = "due-menu";
+  menu.className = "due-menu";
+  menu.setAttribute("role", "menu");
+  menu.innerHTML = options.map(([label, iso]) => `<button role="menuitem" data-set-due="${iso}"><span>${label}</span><small>${esc(new Date(`${iso}T00:00:00`).toLocaleDateString("ru-RU", { weekday: "short", day: "numeric", month: "short" }).replace(".", ""))}</small></button>`).join("")
+    + `<label class="due-pick">Дата<input type="date" value="${esc(task.due || "")}" data-set-due-input></label>`
+    + (task.due ? '<button role="menuitem" class="due-clear" data-set-due="">Убрать срок</button>' : "");
+  menu.dataset.task = task.id;
+  document.body.append(menu);
+  const rect = button.getBoundingClientRect();
+  const left = Math.min(rect.left, innerWidth - menu.offsetWidth - 12);
+  const below = rect.bottom + 6 + menu.offsetHeight < innerHeight;
+  menu.style.left = `${Math.max(12, left)}px`;
+  menu.style.top = `${below ? rect.bottom + 6 : rect.top - menu.offsetHeight - 6}px`;
+  menu.querySelector("button")?.focus();
+}
+
+async function setDue(taskId, due) {
+  const task = taskIndex[taskId];
+  closeDueMenu();
+  try {
+    await taskRequest({ action: "edit", line: task.meta.line, raw: task.meta.raw, text: editableText(task), due: due || null });
+    toast(due ? `Срок: ${dueText(due).text}` : "Срок убран");
+    route();
+  } catch (error) { toast(error.message); route(); }
+}
+
+document.addEventListener("click", (event) => {
+  const menu = document.getElementById("due-menu");
+  if (!menu) return;
+  const choice = event.target.closest("[data-set-due]");
+  if (choice) return setDue(menu.dataset.task, choice.dataset.setDue);
+  if (!event.target.closest("#due-menu, [data-due-menu]")) closeDueMenu();
+});
+document.addEventListener("change", (event) => {
+  const input = event.target.closest("[data-set-due-input]");
+  if (input && input.value) setDue(document.getElementById("due-menu").dataset.task, input.value);
+});
+addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeDueMenu();
+  const typing = event.target.closest("input, textarea, select, [contenteditable]");
+  if (!typing && event.key.toLowerCase() === "n" && !event.ctrlKey && !event.metaKey && location.hash.startsWith("#tasks")) {
+    event.preventDefault();
+    document.getElementById("task-new")?.focus();
+  }
+});
+addEventListener("scroll", closeDueMenu, { passive: true });
 
 const statusOf = (value) => (value === "todo" ? " " : value);
 
@@ -301,27 +511,6 @@ async function moveTask(source, status) {
 }
 
 let dragged = null;
-
-async function renderTasks() {
-  const token = routeToken;
-  const data = await api("/api/tasks");
-  if (token !== routeToken) return;
-  const stale = data.stale.length ? `<details class="group"><summary>Возможно, устарело<span class="count">${data.stale.length}</span>${icon("chev", "chev")}</summary>
-    <div class="group-body">${data.stale.map((t) => { remember(t); return `<div class="stale-row"><span>${esc(taskTitle(t))}</span><small>${esc(t.reasons[0] || "")}</small><button class="tool" data-delete="${t.id}" title="Удалить" aria-label="Удалить">${icon("trash")}</button></div>`; }).join("")}</div></details>` : "";
-  view.innerHTML = `
-    <header class="top"><h1>Дела</h1><div class="top-right"><span>«Актуальное» в Obsidian</span></div></header>
-    <form class="task-add" id="task-add">
-      <input id="task-new" placeholder="Новая задача" aria-label="Новая задача" autocomplete="off">
-      <input id="task-new-date" type="date" aria-label="Срок">
-      <button class="btn primary" type="submit">Добавить</button>
-    </form>
-    ${kanban(data)}
-    <div class="stack">${stale}</div>`;
-  document.getElementById("task-add").onsubmit = (event) => {
-    event.preventDefault();
-    addTask(document.getElementById("task-new"), document.getElementById("task-new-date"));
-  };
-}
 
 function dragSource(el) {
   if (el.dataset.card) return taskIndex[el.dataset.card].meta;
@@ -1387,10 +1576,8 @@ view.addEventListener("change", async (event) => {
     catch (error) { toast(error.message); }
     return;
   }
-  const mover = event.target.closest("[data-move]");
-  if (mover) return moveTask(taskIndex[mover.dataset.move].meta, statusOf(mover.value));
   const done = event.target.closest("[data-done]");
-  if (done) return completeTask(done.dataset.done, done.closest(".todo, .task-row, .do-row"));
+  if (done) return completeTask(done.dataset.done, done.closest(".todo, .task-row, .do-row, .kcard"));
   const dateField = event.target.closest("[data-due]");
   if (dateField) {
     const task = taskIndex[dateField.dataset.due];
@@ -1401,7 +1588,31 @@ view.addEventListener("change", async (event) => {
   }
 });
 
+view.addEventListener("submit", (event) => {
+  const form = event.target.closest("[data-col-form]");
+  if (!form) return;
+  event.preventDefault();
+  board.adding = null;
+  addTask(form.querySelector("input"), null, statusOf(form.dataset.colForm));
+});
+
+view.addEventListener("focusout", (event) => {
+  const form = event.target.closest("[data-col-form]");
+  if (form && !event.target.value.trim()) setTimeout(() => { if (board.adding === form.dataset.colForm) { board.adding = null; paintBoard(); } }, 150);
+});
+
 view.addEventListener("click", async (event) => {
+  const kdone = event.target.closest("[data-kdone]");
+  if (kdone) { kdone.classList.add("on"); return completeTask(kdone.dataset.kdone, kdone.closest(".kcard")); }
+  const shift = event.target.closest("[data-shift]");
+  if (shift) return moveTask(taskIndex[shift.dataset.shift].meta, statusOf(shift.dataset.to));
+  const dueMenu = event.target.closest("[data-due-menu]");
+  if (dueMenu) return document.getElementById("due-menu")?.dataset.task === dueMenu.dataset.dueMenu ? closeDueMenu() : openDueMenu(dueMenu);
+  if (event.target.closest("[data-done-more]")) { board.doneOpen = !board.doneOpen; return paintBoard(); }
+  const only = event.target.closest("[data-board-only]");
+  if (only) { board.only = only.dataset.boardOnly; return paintBoard(); }
+  const colAdd = event.target.closest("[data-col-add]");
+  if (colAdd) { board.adding = board.adding === colAdd.dataset.colAdd ? null : colAdd.dataset.colAdd; return paintBoard(); }
   const chatDone = event.target.closest("[data-chat-done]");
   if (chatDone) {
     event.preventDefault();

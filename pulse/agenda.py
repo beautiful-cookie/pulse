@@ -7,7 +7,7 @@ import os
 import re
 import shutil
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from .config import DATA
@@ -22,6 +22,17 @@ MAX_TEXT = 300
 BULLET_LINE_RE = re.compile(r"^(\s*)[-*] (?!\[)(.*)$")
 DUE_SUFFIX_RE = re.compile(r"\s*\(до \d{1,2}\.\d{2}(?:\.\d{4})?\)\s*$")
 ADD_ANCHOR_RE = re.compile(r"^Сделать сейчас")
+WEEKDAYS = {"пн": 0, "понедельник": 0, "вт": 1, "вторник": 1, "ср": 2, "среда": 2, "среду": 2, "чт": 3, "четверг": 3,
+            "пт": 4, "пятница": 4, "пятницу": 4, "сб": 5, "суббота": 5, "субботу": 5, "вс": 6, "воскресенье": 6}
+MONTH_STEMS = ("январ", "феврал", "март", "апрел", "ма", "июн", "июл", "август", "сентябр", "октябр", "ноябр", "декабр")
+_LEAD = r"(?:^|\s+)(?:(?:до|к|в|во|на|срок)\s+)?"
+QUICK_DUE = [
+    ("rel", re.compile(_LEAD + r"(сегодня|завтра|послезавтра)\s*$", re.I)),
+    ("days", re.compile(_LEAD + r"через\s+(\d{1,3}|неделю|месяц)\s*(дн[яеий]*|день|недел[юиь]*)?\s*$", re.I)),
+    ("weekday", re.compile(_LEAD + r"(" + "|".join(sorted(WEEKDAYS, key=len, reverse=True)) + r")\.?\s*$", re.I)),
+    ("dm", re.compile(_LEAD + r"(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?\s*$", re.I)),
+    ("month", re.compile(_LEAD + r"(\d{1,2})\s+(" + "|".join(MONTH_STEMS) + r")[а-я]*\s*$", re.I)),
+]
 
 
 class Conflict(Exception):
@@ -184,11 +195,51 @@ def chat_slot(lines):
     return last + 1 if lines[last].strip() else start + 1
 
 
-def add(cfg, text, due=None, section=None):
+def split_due(text, today=None):
+    """Срок в конце новой задачи: «Сдать эссе в пятницу» даёт текст «Сдать эссе» и дату пятницы."""
+    today = today or date.today()
+    text = (text or "").strip()
+    for kind, pattern in QUICK_DUE:
+        match = pattern.search(text)
+        if not match or not text[:match.start()].strip():
+            continue
+        word = match[1].lower()
+        day = None
+        if kind == "rel":
+            day = today + timedelta(days={"сегодня": 0, "завтра": 1, "послезавтра": 2}[word])
+        elif kind == "days":
+            unit = (match[2] or "").lower()
+            if word == "неделю":
+                day = today + timedelta(days=7)
+            elif word == "месяц":
+                day = today + timedelta(days=30)
+            else:
+                day = today + timedelta(days=int(word) * (7 if unit.startswith("недел") else 1))
+        elif kind == "weekday":
+            day = today + timedelta(days=(WEEKDAYS[word] - today.weekday() - 1) % 7 + 1)
+        else:
+            if kind == "dm":
+                d, m, y = int(match[1]), int(match[2]), match[3]
+            else:
+                d, m, y = int(match[1]), MONTH_STEMS.index(match[2].lower()) + 1, None
+            year = (int(y) + (2000 if len(y) == 2 else 0)) if y else today.year
+            try:
+                day = date(year, m, d)
+            except ValueError:
+                continue
+            if not y and day < today:
+                day = date(year + 1, m, d)
+        return text[:match.start()].rstrip(" ,.-—"), day.isoformat()
+    return text, None
+
+
+def add(cfg, text, due=None, section=None, status=" "):
+    if status not in STATUSES:
+        raise ValueError("Нет такой колонки")
     path = agenda_path(cfg)
     lines, newline = read_lines(path)
     slot = chat_slot(lines) if section == CHAT_SECTION else default_slot(lines)
-    value = task_line("", " ", with_due(clean_text(text), due))
+    value = task_line("", status, with_due(clean_text(text), due))
     lines.insert(slot, value)
     write_lines(path, lines, newline)
     return {"line": slot, "raw": value}

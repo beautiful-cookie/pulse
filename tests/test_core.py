@@ -552,6 +552,29 @@ class AgendaFile(unittest.TestCase):
         agenda.add(self.cfg, "Новая задача", "2026-11-05")
         self.assertIn("Сделать сейчас: \n\n- [ ] Новая задача (до 05.11)\n- [x] Готовое", self.text())
 
+    def test_add_straight_into_a_column(self):
+        result = agenda.add(self.cfg, "Собрать данные", status="/")
+        self.assertEqual(result["raw"], "- [/] Собрать данные")
+        with self.assertRaises(ValueError):
+            agenda.add(self.cfg, "Что-то", status="?")
+
+    def test_due_is_taken_from_the_end_of_a_new_task(self):
+        wednesday = date(2026, 11, 11)
+        cases = {
+            "Сдать эссе в пятницу": ("Сдать эссе", "2026-11-13"),
+            "Позвонить в деканат завтра": ("Позвонить в деканат", "2026-11-12"),
+            "Отчёт до 20.11": ("Отчёт", "2026-11-20"),
+            "Купить билеты 3 декабря": ("Купить билеты", "2026-12-03"),
+            "Статья через 3 дня": ("Статья", "2026-11-14"),
+            "Встреча в ср": ("Встреча", "2026-11-18"),
+            "Отчёт 05.11": ("Отчёт", "2027-11-05"),
+            "Позвонить маме": ("Позвонить маме", None),
+            "Через неделю": ("Через неделю", None),
+            "Встреча 30.02": ("Встреча 30.02", None),
+        }
+        for text, expected in cases.items():
+            self.assertEqual(agenda.split_due(text, wednesday), expected, text)
+
     def test_edit_replaces_due_and_keeps_markup(self):
         task = self.task("Читать")
         result = agenda.edit(self.cfg, task["line"], task["raw"], "Читать тему **срочно**", "2026-11-05")

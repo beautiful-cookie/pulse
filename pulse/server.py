@@ -131,7 +131,10 @@ def task_action(body):
         raise ValueError("Дата должна быть в формате ГГГГ-ММ-ДД")
     with _agenda_lock, db.connect() as conn:
         if action == "add":
-            result = agenda.add(cfg, body.get("text", ""), due)
+            text = body.get("text", "")
+            if not due and body.get("parse"):
+                text, due = agenda.split_due(text)
+            result = {**agenda.add(cfg, text, due, status=str(body.get("status") or " ")), "due": due}
         elif action == "done":
             result = agenda.set_done(cfg, line, raw, bool(body.get("done")))
         elif action == "status":

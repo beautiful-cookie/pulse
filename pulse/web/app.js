@@ -586,7 +586,7 @@ function doRow(row, lead) {
     return `<div class="${cls}">
       <input type="checkbox" class="task-check" data-done="${row.task.id}" aria-label="Готово: ${esc(row.task.title)}">
       <a class="do-text" href="${esc(safeUrl(row.task.url))}"><span class="do-title">${esc(taskTitle(row.task))}</span></a>
-      <span class="do-side"><span class="do-tools">${remove}</span><span class="when ${when.tone}">${esc(when.text)}</span></span></div>`;
+      <span class="do-side"><span class="do-tools">${remove}</span><button class="when when-btn ${when.tone}" data-due-menu="${row.task.id}" title="Изменить срок">${esc(when.text)}</button></span></div>`;
   }
   const { chat } = row;
   const when = chat.due ? whenLabel(chat.due) : null;
@@ -604,15 +604,43 @@ function doRow(row, lead) {
       </span>${when ? `<span class="when ${when.tone}">${esc(when.text)}</span>` : ""}</span></div>`;
 }
 
+function laterRow(task) {
+  remember(task);
+  const remove = isFromChat(task)
+    ? `<button class="tool" data-reject="${task.id}" title="Удалить: не дело, больше не добавлять" aria-label="Удалить: ${esc(task.title)}">${icon("trash")}</button>`
+    : `<button class="tool" data-delete="${task.id}" title="Удалить из «Актуального»" aria-label="Удалить: ${esc(task.title)}">${icon("trash")}</button>`;
+  return `<div class="do-row later">
+    <input type="checkbox" class="task-check" data-done="${task.id}" aria-label="Готово: ${esc(task.title)}">
+    <a class="do-text" href="${esc(safeUrl(task.url))}"><span class="do-title">${esc(taskTitle(task))}</span></a>
+    <span class="do-side"><span class="do-tools">
+      <button class="tool" data-due-menu="${task.id}" title="Поставить срок" aria-label="Поставить срок: ${esc(task.title)}">${icon("calendar")}</button>${remove}
+    </span></span></div>`;
+}
+
 function doColumn(data) {
   const rows = data.queue;
   const shown = rows.slice(0, 7).map((row, index) => doRow(row, index === 0)).join("");
   const extra = rows.length > 7 ? `<details class="mini"><summary>Ещё ${rows.length - 7}</summary>${rows.slice(7).map((r) => doRow(r, false)).join("")}</details>` : "";
+  const later = data.agenda.length ? `<div class="do-later"><div class="sub-label"><span>Без срока</span><a class="link" href="#tasks">Все дела</a></div>
+    ${data.agenda.map(laterRow).join("")}</div>` : "";
   return `<section class="col" id="do">
     <h2 class="sec">Сделать<span>${rows.length || ""}</span></h2>
     ${shown || '<p class="calm">Срочного нет. Можно заняться своим.</p>'}${extra}
-    <form class="quick-add" id="quick-add"><input id="quick-task" placeholder="Добавить дело" aria-label="Новая задача" autocomplete="off"></form>
+    <form class="quick-add" id="quick-add">${icon("plus")}<input id="quick-task" placeholder="Добавить дело: «позвонить завтра»" title="Срок можно написать словами в конце: «завтра», «в пятницу», «до 20.11»" aria-label="Новая задача" autocomplete="off"></form>
+    ${later}
   </section>`;
+}
+
+function glance(data) {
+  const t = data.tiles;
+  const items = [
+    t.overdue && `<a class="glance-item bad" href="#tasks" data-glance="soon">Просрочено<b>${t.overdue}</b></a>`,
+    t.week && `<a class="glance-item warn" href="#tasks" data-glance="soon">На неделе<b>${t.week}</b></a>`,
+    t.reply && `<button class="glance-item accent" data-scroll="do">Ждут ответа<b>${t.reply}</b></button>`,
+    t.news && `<button class="glance-item" data-scroll="news-panel">Новости по темам<b>${t.news}</b></button>`,
+  ].filter(Boolean);
+  const calm = t.overdue || t.week || t.reply ? "" : '<span class="glance-calm">Срочного нет</span>';
+  return `<nav class="glance" aria-label="Коротко о дне">${calm}${items.join("")}</nav>`;
 }
 
 const ASK_HINTS = {
@@ -940,7 +968,6 @@ function moreBlock(data) {
   const stale = data.stale.map((s) => `<a class="quiet-row" href="${esc(safeUrl(s.url))}" title="${esc(s.reasons[0] || "")}"><span>${esc(s.title)}</span></a>`).join("");
   const failing = data.failing.map((f) => `<p class="note">${esc(f.name)}</p>`).join("");
   return `<section class="more">
-    ${moreItem("Дела без срока", data.agenda.length, data.agenda.map(todoRow).join(""))}
     ${moreItem("Остальные чаты", others.length, others.map(chatRow).join(""))}
     ${moreItem("Повторить", data.reviews_total, repeat)}
     ${moreItem("Возможно, устарело", data.stale_total, stale)}
@@ -966,6 +993,7 @@ function renderToday(data) {
       <div class="top-right"><span id="run-stage" class="${data.running ? "busy" : ""}" title="${esc(updated)}">${esc(data.running ? `${data.stage.text}…` : last)}</span>
         <button class="icon-btn ${data.running ? "spin" : ""}" id="refresh" ${data.running ? "disabled" : ""} title="Обновить" aria-label="Обновить">${icon("refresh")}</button></div>
     </header>
+    ${glance(data)}
     <div class="home">
       ${doColumn(data)}
       <section class="col" id="news-panel">
@@ -979,6 +1007,8 @@ function renderToday(data) {
     </div>
     ${moreBlock(data)}`;
   document.getElementById("news").innerHTML = newsList();
+  const doCol = document.getElementById("do");
+  doCol.classList.toggle("pin", doCol.offsetHeight < innerHeight - 60);  // короткий список дел остаётся на виду, пока читаются новости
   document.getElementById("topic-pick").onchange = (event) => {
     activeTopic = event.target.value;
     document.getElementById("news").innerHTML = newsList();
@@ -1602,6 +1632,10 @@ view.addEventListener("focusout", (event) => {
 });
 
 view.addEventListener("click", async (event) => {
+  const glanceLink = event.target.closest("[data-glance]");
+  if (glanceLink) board.only = glanceLink.dataset.glance;
+  const scrollTo = event.target.closest("[data-scroll]");
+  if (scrollTo) return document.getElementById(scrollTo.dataset.scroll)?.scrollIntoView({ behavior: calmMotion() ? "auto" : "smooth" });
   const kdone = event.target.closest("[data-kdone]");
   if (kdone) { kdone.classList.add("on"); return completeTask(kdone.dataset.kdone, kdone.closest(".kcard")); }
   const shift = event.target.closest("[data-shift]");

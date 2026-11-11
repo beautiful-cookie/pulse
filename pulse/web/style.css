@@ -721,3 +721,51 @@ button:active:not(:disabled), .btn:active, .chip:active { transform: scale(.97);
 .sg.compact .pick-gist { font-size: 14.5px; }
 #home-suggest:empty { display: none; }
 @media (max-width: 720px) { .sg-about-foot { flex-direction: column; align-items: stretch; } }
+
+/* Главная: коротко о дне, дела без срока, единые подписи */
+.glance { display: flex; flex-wrap: wrap; gap: 6px; margin: -4px 0 18px; }
+.glance-item { all: unset; cursor: pointer; display: inline-flex; align-items: baseline; gap: 6px; font-size: 13px; color: var(--ink-2); background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: 4px 11px; transition: border-color .15s, background-color .15s; }
+.glance-item b { font-weight: 650; font-variant-numeric: tabular-nums; color: var(--ink); }
+.glance-item:hover { border-color: var(--line-2); }
+.glance-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.glance-item.bad { background: var(--bad-soft); border-color: transparent; color: var(--bad); }
+.glance-item.bad b { color: var(--bad); }
+.glance-item.warn { background: var(--warn-soft); border-color: transparent; color: var(--warn); }
+.glance-item.warn b { color: var(--warn); }
+.glance-item.accent { background: var(--accent-soft); border-color: transparent; color: var(--accent); }
+.glance-item.accent b { color: var(--accent); }
+.glance-calm { font-size: 13px; color: var(--good); padding: 4px 2px; }
+
+.do-row .task-check, .do-mark { appearance: none; -webkit-appearance: none; width: 18px; height: 18px; margin: 1px 0 0; border: 1.5px solid var(--line-2); border-radius: 50%; background: var(--surface); display: grid; place-items: center; cursor: pointer; }
+.do-row .task-check:hover, .do-mark:hover { border-color: var(--good); color: var(--good); }
+.do-row .task-check:checked { background: var(--good); border-color: var(--good); }
+.do-mark .ico { width: 12px; height: 12px; stroke-width: 3; }
+.do-row { grid-template-columns: 22px minmax(0, 1fr) auto; }
+.when-btn { border: 0; font-family: inherit; cursor: pointer; border-radius: 5px; }
+.when-btn:hover { background: var(--surface-2) !important; }
+
+.col .quick-add { position: relative; margin-top: 8px; }
+.col .quick-add > .ico { position: absolute; left: 0; top: 7px; width: 15px; height: 15px; color: var(--muted); pointer-events: none; }
+.col .quick-add input { padding: 6px 0 6px 32px; border-bottom-style: solid; border-bottom-color: var(--line); }
+.col .quick-add input::placeholder { color: var(--muted); }
+
+.do-later { margin-top: 18px; }
+.do-later .do-row { padding: 6px 0; border-bottom: 0; border-top: 1px solid var(--line); }
+.do-later .do-row:first-of-type { border-top: 0; }
+.do-later .do-title { font-size: 14px; color: var(--ink-2); }
+.sub-label { display: flex; justify-content: space-between; align-items: baseline; padding: 4px 0 4px; }
+.sub-label > span:first-child, .news-label, .news-head > span:first-child { font-size: 11.5px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.sub-label .link, .sg-label .link { font-size: 12px; text-transform: none; letter-spacing: 0; font-weight: 400; }
+#news .news-label { text-transform: none; letter-spacing: 0; font-weight: 500; font-size: 12px; }
+.picks .news-label { padding-top: 12px; }
+
+@media (hover: hover) {
+  .pick { position: relative; }
+  .pick-tools { position: absolute; top: 4px; right: 0; background: var(--page); border-radius: 8px; padding-left: 4px; }
+}
+@media (max-width: 720px) {
+  .glance { margin: -6px 0 14px; gap: 5px; }
+  .glance-item { font-size: 12.5px; padding: 3px 9px; }
+}
+@media (min-width: 901px) { #do.pin { position: sticky; top: 18px; } }
+@media (hover: none) { .do-mark { color: transparent; } }

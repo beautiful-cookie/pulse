@@ -1297,6 +1297,30 @@ function privacyBody(data) {
 }
 
 let chatGroups = [];
+let chatSnapshot = null;  // выбор до флажка «Выбрать все чаты»: снятие флажка возвращает его
+
+function chatBulk(tg) {
+  const chosen = new Set(draft.tg_private.map((c) => c.id));
+  const picked = tg.dialogs.filter((d) => chosen.has(d.id)).length;
+  const all = tg.dialogs.length > 0 && picked === tg.dialogs.length;
+  if (!all) chatSnapshot = null;
+  return `<div class="chat-bulk">
+      <label class="chat-all"><input type="checkbox" id="chat-all" ${all ? "checked" : ""}><span>Выбрать все чаты</span></label>
+      <button class="btn" id="chat-none" type="button" ${picked ? "" : "disabled"}>Снять все чаты</button>
+      <span class="soft" id="chat-picked">Выбрано ${picked} из ${tg.dialogs.length}</span></div>`;
+}
+
+function syncChatBulk(tg) {
+  const box = document.getElementById("chat-all");
+  if (!box) return;
+  const chosen = new Set(draft.tg_private.map((c) => c.id));
+  const picked = tg.dialogs.filter((d) => chosen.has(d.id)).length;
+  const all = picked === tg.dialogs.length;
+  if (!all) chatSnapshot = null;  // после ручной правки «до флажка» уже нет: остаётся то, что выбрано сейчас
+  box.checked = all;
+  document.getElementById("chat-none").disabled = !picked;
+  document.getElementById("chat-picked").textContent = `Выбрано ${picked} из ${tg.dialogs.length}`;
+}
 
 function telegramBody(tg) {
   if (!tg.connected) return '<p class="note">Запустите <code>telegram_login.bat</code>. Подключение только читает и не помечает сообщения прочитанными.</p>';
@@ -1315,6 +1339,7 @@ function telegramBody(tg) {
       <div class="chatlist">${g.items.map(row).join("")}</div></details>` : "")).join("");
   return `<div class="tg-tools"><input id="chat-filter" class="grow-input" placeholder="Найти чат" aria-label="Найти чат">
       <button class="btn" id="tg-refresh" type="button">Обновить список</button></div>
+    ${chatBulk(tg)}
     <p class="note">Всего чатов: ${tg.dialogs.length}, папок: ${(tg.folders || []).length}. Архивные тоже здесь. Выбор сохраняется кнопкой «Сохранить» внизу.</p>
     ${groups}`;
 }
@@ -1511,7 +1536,7 @@ function bindSettings(data) {
   view.querySelectorAll("[data-remove-channel]").forEach((el) => { el.onclick = () => { draft.tg_public.splice(Number(el.dataset.removeChannel), 1); repaint(); }; });
   view.querySelectorAll("[data-feed-on]").forEach((el) => { el.onchange = () => { draft.feeds[Number(el.dataset.feedOn)].enabled = el.checked; }; });
   view.querySelectorAll("[data-chat]").forEach((el) => {
-    el.onchange = () => setChat(tg, Number(el.dataset.chat), el.checked);
+    el.onchange = () => { setChat(tg, Number(el.dataset.chat), el.checked); syncChatBulk(tg); };
   });
   const folderPick = (index, on) => {
     chatGroups[index].items.forEach((d) => setChat(tg, d.id, on));
@@ -1521,6 +1546,39 @@ function bindSettings(data) {
   };
   view.querySelectorAll("[data-folder-all]").forEach((el) => { el.onclick = () => folderPick(Number(el.dataset.folderAll), true); });
   view.querySelectorAll("[data-folder-none]").forEach((el) => { el.onclick = () => folderPick(Number(el.dataset.folderNone), false); });
+  const allChats = document.getElementById("chat-all");
+  if (allChats) allChats.onchange = () => {
+    readSimpleFields();
+    if (allChats.checked) {
+      chatSnapshot = draft.tg_private.map((c) => c.id);
+      const have = new Set(chatSnapshot);
+      tg.dialogs.forEach((d) => { if (!have.has(d.id)) draft.tg_private.push({ id: d.id, name: d.name, kind: d.kind, level: "обычно" }); });
+      paintSettings(data);
+      chatSnapshot = chatSnapshot || [];
+      toast(`Выбраны все чаты: ${tg.dialogs.length}. Нажмите «Сохранить»`);
+    } else if (chatSnapshot) {
+      const before = new Set(chatSnapshot);
+      draft.tg_private = draft.tg_private.filter((c) => before.has(c.id));  // важность, заданную за это время, не теряем
+      chatSnapshot = null;
+      paintSettings(data);
+      toast(`Вернул прежний выбор: ${draft.tg_private.length}. Нажмите «Сохранить»`);
+    } else {
+      allChats.checked = true;  // все чаты были выбраны ещё до флажка, возвращать нечего
+      toast("Все чаты были выбраны и раньше. Снять их можно кнопкой «Снять все чаты»");
+    }
+  };
+  const noChats = document.getElementById("chat-none");
+  if (noChats) noChats.onclick = () => {
+    readSimpleFields();
+    const before = draft.tg_private;
+    draft.tg_private = [];
+    chatSnapshot = null;
+    paintSettings(data);
+    toast(`Сняты все чаты: ${before.length}. Нажмите «Сохранить»`, "Вернуть", () => {
+      draft.tg_private = before;
+      paintSettings(data);
+    });
+  };
   const refreshChats = document.getElementById("tg-refresh");
   if (refreshChats) refreshChats.onclick = async () => {
     refreshChats.disabled = true;

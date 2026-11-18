@@ -48,13 +48,17 @@ def backups_dir():
 
 
 def read_lines(path):
+    if not path.exists():  # в новом хранилище заметки ещё нет: первая задача её создаст
+        return ["Сделать сейчас: ", ""], "\n"
     text = path.read_bytes().decode("utf-8")
     newline = "\r\n" if "\r\n" in text else "\n"
     return text.split(newline), newline
 
 
 def write_lines(path, lines, newline):
-    backup(path)
+    if path.exists():
+        backup(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.pulse-tmp")
     tmp.write_bytes(newline.join(lines).encode("utf-8"))
     for attempt in range(5):  # Obsidian может ненадолго держать файл открытым

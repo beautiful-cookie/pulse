@@ -552,6 +552,11 @@ class AgendaFile(unittest.TestCase):
         agenda.add(self.cfg, "Новая задача", "2026-11-05")
         self.assertIn("Сделать сейчас: \n\n- [ ] Новая задача (до 05.11)\n- [x] Готовое", self.text())
 
+    def test_first_task_creates_the_note(self):
+        self.note.unlink()
+        agenda.add(self.cfg, "Первая задача")
+        self.assertIn("- [ ] Первая задача", self.text())
+
     def test_add_straight_into_a_column(self):
         result = agenda.add(self.cfg, "Собрать данные", status="/")
         self.assertEqual(result["raw"], "- [/] Собрать данные")
@@ -2124,7 +2129,7 @@ class ClaudeOnPublicChats(unittest.TestCase):
 
     def test_profile_and_numbering_reach_claude(self):
         prompt, _ = claude_ask.build_prompt(self.conn, self.cfg, "Найди заказы")
-        self.assertIn("О Максиме, его словами:\nПсихолог, пишу тексты", prompt)
+        self.assertIn("О пользователе, его словами:\nПсихолог, пишу тексты", prompt)
         self.assertIn("Его интересы: философия сознания", prompt)
         self.assertIn("### Фриланс: тексты\n[1] Заказчик,", prompt)
 

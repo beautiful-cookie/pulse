@@ -6,6 +6,12 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "pulse", "serve"],
       "port": 8765
+    },
+    {
+      "name": "pulse-demo",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "pulse", "demo"],
+      "port": 8766
     }
   ]
 }

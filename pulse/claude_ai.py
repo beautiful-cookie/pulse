@@ -7,6 +7,7 @@ Claude работает в облаке, поэтому сюда идут тол
 import glob
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -57,7 +58,9 @@ def may_read(item, cfg):
 def find_cli():
     """Папка содержит номер версии и меняется с обновлением приложения."""
     paths = glob.glob(os.path.expandvars(CLI_GLOB))
-    return max(paths, key=os.path.getmtime) if paths else None
+    if paths:
+        return max(paths, key=os.path.getmtime)
+    return shutil.which("claude")  # Claude Code, установленный отдельно от приложения
 
 
 def clean_env():

@@ -1,0 +1,4 @@
+telethon>=1.45
+qrcode>=8.0
+beautifulsoup4>=4.12
+certifi>=2024.0

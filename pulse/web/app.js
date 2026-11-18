@@ -903,7 +903,7 @@ function renderSuggest(data) {
     </div>
     <details class="sg-about" ${data.profile ? "" : "open"}>
       <summary>О себе${data.profile ? "" : ": заполните, и подбор станет точнее"}</summary>
-      <form id="sg-about"><textarea id="sg-about-text" rows="4" placeholder="Навыки, опыт, что ищете: например, «пишу тексты и делаю исследования по нейронауке, ищу удалённые заказы и стажировки»">${esc(data.about)}</textarea>
+      <form id="sg-about"><textarea id="sg-about-text" rows="4" placeholder="Навыки, опыт, что ищете: например, «пишу тексты и делаю исследования, ищу удалённые заказы и стажировки»">${esc(data.about)}</textarea>
       <div class="sg-about-foot"><small class="soft">Правила и локальная модель читают это на компьютере. Claude получает этот текст только по кнопке «Подобрать с Claude» и в окне «Спросить».</small>
       <button class="btn primary" type="submit">Сохранить</button></div></form>
     </details>
@@ -1291,7 +1291,7 @@ function privacyBody(data) {
     <label class="switch plain"><input type="checkbox" id="claude-public" ${draft.privacy.claude_public_chats !== false ? "checked" : ""}>
       <span>Отвечать Claude по открытым группам<small class="soft">Только группы с публичной ссылкой t.me: их читает любой без вступления. Галочкой ниже можно закрыть любую</small></span></label>
     ${openChatsList(data)}
-    <label class="field">О себе для Claude: навыки, опыт, что ищете<textarea id="claude-profile" placeholder="Например: психолог, 3 курс ВШЭ; пишу тексты, делаю опросы и анализ данных в Python; ищу удалённые заказы до 10 часов в неделю">${esc(draft.claude.profile || "")}</textarea><small class="soft">Уходит в Claude вместе с вопросом. Локальной модели не нужно</small></label>
+    <label class="field">О себе для Claude: навыки, опыт, что ищете<textarea id="claude-profile" placeholder="Например: студент, 3 курс; пишу тексты, делаю опросы и анализ данных в Python; ищу удалённые заказы до 10 часов в неделю">${esc(draft.claude.profile || "")}</textarea><small class="soft">Уходит в Claude вместе с вопросом. Локальной модели не нужно</small></label>
     <label class="switch"><input type="checkbox" id="claude-chats" ${draft.privacy.claude_reads_chats ? "checked" : ""}>
       <span>Разрешить Claude читать отмеченные чаты<small>Текст будет уходить на серверы Anthropic</small></span></label>`;
 }

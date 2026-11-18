@@ -1,5 +1,5 @@
-"""Пути и настройки «Пульса». Темы и источники по умолчанию взяты из
-«20 Области/Новости/Обзор.md»: те же темы, первоисточники и чёрный список."""
+"""Пути и настройки «Пульса». Темы и источники по умолчанию это пример: их меняют в настройках,
+а личные значения хранятся в config.json, который не попадает в репозиторий."""
 import json
 import os
 import threading
@@ -29,7 +29,7 @@ def gn(query, lang="ru"):
 
 
 DEFAULT_CONFIG = {
-    "vault": r"C:\Users\User\Documents\Obsidian Vault",
+    "vault": str(Path.home() / "Documents" / "Obsidian Vault"),
     "chat_interval_min": 5,
     "news_interval_min": 30,
     "model_interval_min": 30,
@@ -39,7 +39,7 @@ DEFAULT_CONFIG = {
     "budget_main": 7,
     "topic_cap": 3,
     "news_window_days": 4,
-    "me": {"names": ["Максим", "Хадеев"]},
+    "me": {"names": []},  # ваши имя и фамилия: по ним Пульс замечает, что к вам обращаются
     "privacy": {"claude_reads_chats": False},
     "local_ai": {"url": "http://127.0.0.1:1234/v1", "external": False, "max_chats_per_run": 15},
     "active_mode": "all",
@@ -137,7 +137,6 @@ DEFAULT_CONFIG = {
         {"name": "Поиск: psychology", "url": gn("psychology study OR cognitive science OR replication psychology", "en"), "topic": "psych"},
         {"name": "Поиск: психология", "url": gn("психологи исследование когнитивная психология"), "topic": "psych"},
         {"name": "Поиск: стажировки", "url": gn("стажировка студентов психология OR нейронаука OR аналитика"), "topic": "career"},
-        {"name": "Поиск: ВШЭ", "url": gn("НИУ ВШЭ студенты"), "topic": "study"},
     ],
     "tg_public": [],
     "tg_private": [],

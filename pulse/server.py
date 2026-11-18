@@ -21,7 +21,7 @@ TICK_SECONDS = 30
 WEB = Path(__file__).parent / "web"
 PORT = int(os.environ.get("PULSE_PORT", 8765))
 ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
-SETTINGS_KEYS = {"topics", "feeds", "tg_public", "tg_private", "blacklist", "budget_main",
+SETTINGS_KEYS = {"vault", "topics", "feeds", "tg_public", "tg_private", "blacklist", "budget_main",
                  "topic_cap", "chat_interval_min", "news_interval_min", "model_interval_min", "full_collect_hour",
                  "notify", "interests", "me", "privacy", "deadlines", "claude", "modes"}
 LOOPBACK_ONLY = {"/api/settings", "/api/remote", "/api/shutdown", "/api/autostart", "/api/learned", "/api/tg-dialogs",
@@ -89,13 +89,33 @@ def settings_payload():
         learned = learning.view(conn, cfg)
         known = interests.known_names(conn, cfg)
         open_chats = claude_ask.public_chats(conn, cfg)
-    return {"config": {k: cfg[k] for k in SETTINGS_KEYS}, "local_model": local_ai.cached_model(cfg), "telegram": {
+    vault = Path(cfg["vault"])
+    note = cfg["obsidian"]["agenda_notes"][0]
+    obsidian_state = {"vault_found": vault.is_dir(), "note_found": (vault / note).is_file()}
+    return {"config": {**{k: cfg[k] for k in SETTINGS_KEYS}, "agenda_note": note}, "obsidian": obsidian_state,
+        "local_model": local_ai.cached_model(cfg), "telegram": {
         "connected": telegram.is_connected(), "dialogs": telegram.load_dialogs(), "folders": telegram.load_folders()},
         "learned": learned, "autostart": autostart.is_enabled(), "known_names": known, "public_chats": open_chats}
 
 
+def clean_note_path(value):
+    """Заметка для дел: путь внутри хранилища. Пульс пишет только в неё, поэтому выйти из хранилища нельзя."""
+    note = str(value or "").strip().strip('"').replace("\\", "/").strip("/")
+    if not note:
+        raise ValueError("Укажите заметку для дел, например Задачи.md")
+    if ":" in note or any(part in ("", ".", "..") for part in note.split("/")):
+        raise ValueError("Заметка для дел: путь внутри хранилища, например Задачи.md или Входящие/Задачи.md")
+    return note if note.lower().endswith(".md") else note + ".md"
+
+
 def validate_settings(body):
     clean = {k: v for k, v in body.items() if k in SETTINGS_KEYS}
+    if "vault" in clean:
+        clean["vault"] = str(clean["vault"]).strip().strip('"')[:400]
+        if not clean["vault"]:
+            raise ValueError("Укажите папку хранилища Obsidian")
+    if "agenda_note" in body:
+        clean["agenda_note"] = clean_note_path(body["agenda_note"])
     for feed in clean.get("feeds", []):
         if not re.match(r"https?://", feed.get("url", "")):
             raise ValueError("Адрес ленты должен начинаться с http:// или https://")
@@ -413,7 +433,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, **task_action(body)})
             if path == "/api/settings":
                 cfg = load_config()
-                cfg.update(validate_settings(body))
+                clean = validate_settings(body)
+                note = clean.pop("agenda_note", None)
+                cfg.update(clean)
+                if note:  # остальные заметки списка не трогаем, меняется только первая, куда пишутся дела
+                    cfg["obsidian"]["agenda_notes"] = [note] + [n for n in cfg["obsidian"]["agenda_notes"][1:] if n != note]
                 save_config(cfg)
                 threading.Thread(target=pipeline.run_in_background, daemon=True).start()
                 return self._json({"ok": True})

@@ -2402,5 +2402,17 @@ class Suggestions(unittest.TestCase):
             suggest.start(self.cfg, "gpt")
 
 
+class ObsidianSettings(unittest.TestCase):
+    def test_note_stays_inside_the_vault(self):
+        from pulse.server import clean_note_path, validate_settings
+        self.assertEqual(clean_note_path("Задачи"), "Задачи.md")
+        self.assertEqual(clean_note_path("Входящие\\Задачи.md"), "Входящие/Задачи.md")
+        for bad in ("../Задачи.md", "C:/Задачи.md", "a//b.md", ""):
+            with self.assertRaises(ValueError, msg=bad):
+                clean_note_path(bad)
+        clean = validate_settings({"vault": ' "D:\\Заметки" ', "agenda_note": "Дела"})
+        self.assertEqual(clean, {"vault": "D:\\Заметки", "agenda_note": "Дела.md"})
+
+
 if __name__ == "__main__":
     unittest.main()

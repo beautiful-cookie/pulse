@@ -216,8 +216,8 @@ def index_notes(conn, vault):
 def collect(conn, cfg):
     vault = Path(cfg["vault"])
     key = "obsidian"
-    if not vault.is_dir():
-        db.record_source(conn, key, "Obsidian", "obsidian", error=f"Нет папки хранилища: {vault}")
+    if not vault.is_dir():  # без Obsidian это нормально: папку создаст первая задача, а состояние видно в настройках
+        db.record_source(conn, key, "Obsidian", "obsidian", count=0)
         return 0
     opts = cfg["obsidian"]
     today = date.today()

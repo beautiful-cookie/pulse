@@ -1369,6 +1369,18 @@ function modesBody() {
     </details>`).join("");
 }
 
+function obsidianBody(data) {
+  const state = data.obsidian;
+  const status = state.vault_found
+    ? `<div class="status-row">${icon("check")}Папка найдена${state.note_found ? ", заметка для дел есть" : ". Заметку для дел Пульс создаст сам, когда вы добавите первую задачу"}</div>`
+    : `<div class="status-row off">${icon("shield")}Такой папки нет. Если Obsidian у вас не стоит, ничего страшного: Пульс создаст папку и будет хранить дела в обычном файле</div>`;
+  return `${status}
+    <label class="field">Папка хранилища Obsidian<input id="vault" value="${esc(draft.vault)}" placeholder="C:\\Users\\Имя\\Documents\\Obsidian Vault" autocomplete="off">
+      <small class="soft">Откройте папку хранилища в Проводнике, щёлкните по адресной строке сверху, скопируйте адрес и вставьте сюда</small></label>
+    <label class="field">Заметка для дел<input id="agenda-note" value="${esc(draft.agenda_note)}" placeholder="Задачи.md" autocomplete="off">
+      <small class="soft">Путь внутри хранилища, например Задачи.md. Пульс пишет только в эту заметку, остальные лишь читает</small></label>`;
+}
+
 function updatesBody(data) {
   return `<div class="two">
       <label class="field">Чаты, раз в минут<input type="number" min="1" id="chat-interval" value="${draft.chat_interval_min}"></label>
@@ -1460,6 +1472,7 @@ function paintSettings(data) {
     ${group("chat", "Чаты Telegram", data.telegram.connected ? `${draft.tg_private.length} выбрано` : "не подключён", telegramBody(data.telegram))}
     ${group("sliders", "Режимы внимания", String(draft.modes.length), `<p class="note">Множитель темы: 1 как обычно, 2 вдвое важнее, 0 скрыть.</p>${modesBody()}`)}
     ${group("star", "Мои интересы", String(draft.interests.watch.length), interestsBody(data), true)}
+    ${group("note", "Obsidian и дела", data.obsidian.vault_found ? "" : "папки нет", obsidianBody(data))}
     ${group("refresh", "Обновление и уведомления", "", updatesBody(data))}
     ${group("star", "Чему научился Пульс", String(data.learned.marks + data.learned.chats.length), learnedBody(data.learned))}
     ${group("today", "Телефон", "", '<div id="remote-box"></div>')}
@@ -1495,6 +1508,8 @@ function readSimpleFields() {
   draft.deadlines.saved = document.getElementById("saved-messages").checked;
   draft.interests.about = document.getElementById("about").value.split("\n").map((s) => s.trim()).filter(Boolean);
   draft.me.names = splitList(document.getElementById("names").value);
+  draft.vault = document.getElementById("vault").value.trim();
+  draft.agenda_note = document.getElementById("agenda-note").value.trim();
   draft.blacklist = splitList(document.getElementById("blacklist").value);
   draft.privacy.claude_reads_chats = document.getElementById("claude-chats").checked;
   draft.privacy.claude_public_chats = document.getElementById("claude-public").checked;
@@ -1644,10 +1659,12 @@ function bindSettings(data) {
     repaint();
   };
   document.getElementById("save").onclick = async () => {
+    const before = `${draft.vault}|${draft.agenda_note}`;
     readSimpleFields();
     try {
       await api("/api/settings", draft);
       toast("Сохранено");
+      if (before !== `${draft.vault}|${draft.agenda_note}`) renderSettings();  // показать, нашлась ли новая папка
     } catch (error) { toast(error.message); }
   };
 }

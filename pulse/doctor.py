@@ -41,13 +41,17 @@ def check_telegram(conn, cfg):
     line(sum(c in asked for c in chats) == len(chats), f"последний ответ проверен в {sum(c in asked for c in chats)} чатах из {len(chats)}")
 
 
+def ago(minutes):
+    return "ещё ни разу: запустите start.bat" if minutes is None else f"{minutes} мин назад"
+
+
 def check_news(conn):
     rows = conn.execute("SELECT last_error, last_ok FROM sources WHERE type IN ('rss','tg_public')").fetchall()
     failing = sum(1 for r in rows if r["last_error"])
     line(rows and not failing, f"источники новостей: работают {len(rows) - failing} из {len(rows)}")
     newest = conn.execute("SELECT MAX(collected) m FROM items WHERE kind IN ('news','post')").fetchone()["m"]
     minutes = age_minutes(newest)
-    line(minutes is not None and minutes < 720, f"последняя новая новость собрана {minutes} мин назад")
+    line(minutes is not None and minutes < 720, f"последняя новая новость собрана {ago(minutes)}")
 
 
 def run():
@@ -57,8 +61,9 @@ def run():
         last = db.kv_get(conn, "last_run") or {}
         for key, label, limit in (("chats", "чаты", cfg["chat_interval_min"] * 3), ("news", "новости", cfg["news_interval_min"] * 3), ("full", "полное обновление", 36 * 60)):
             minutes = age_minutes(marks.get(key))
-            line(minutes is not None and minutes <= limit, f"{label}: обновлено {minutes} мин назад")
-        print(f"     последний проход: {last.get('mode', '?')}, {last.get('seconds', '?')} с")
+            line(minutes is not None and minutes <= limit, f"{label}: обновлено {ago(minutes)}")
+        if last:
+            print(f"     последний проход: {last.get('mode', '?')}, {last.get('seconds', '?')} с")
         check_telegram(conn, cfg)
         check_news(conn)
     line(bool(local_ai.cached_model(cfg)), f"локальная модель: {local_ai.cached_model(cfg) or 'не запущена'}")

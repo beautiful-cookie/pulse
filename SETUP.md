@@ -16,7 +16,7 @@
 Откройте командную строку в папке, где хотите держать Пульс, и выполните:
 
 ```bash
-git clone https://github.com/ЛОГИН/pulse.git
+git clone https://github.com/beautiful-cookie/pulse.git
 cd pulse
 ```
 

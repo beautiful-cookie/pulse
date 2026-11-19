@@ -1,17 +1,13 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-echo Скачиваю локальную модель для Пульса: программу llama.cpp и модель Gemma, всего около 3 ГБ.
-echo Это может занять от 5 минут до часа, смотря какой интернет. Окно не закрывайте.
-echo Если загрузка прервётся, просто запустите этот файл ещё раз: она продолжится с того же места.
-echo.
-python -X utf8 -m pulse install-model
+where python >nul 2>nul
 if errorlevel 1 (
-  echo.
-  echo Не получилось. Проверьте интернет и запустите файл ещё раз.
+  echo Python not found. Install Python 3.12 from python.org and tick "Add python.exe to PATH".
+  echo See INSTRUKCIYA, step 1.
   pause
   exit /b 1
 )
+python -X utf8 -m pulse install-model
 echo.
-echo Модель на месте. Перезапустите Пульс: закройте его чёрное окно и снова откройте start.bat.
 pause

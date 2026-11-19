@@ -2402,6 +2402,13 @@ class Suggestions(unittest.TestCase):
             suggest.start(self.cfg, "gpt")
 
 
+class Launchers(unittest.TestCase):
+    def test_bat_files_are_plain_latin(self):
+        # cmd с chcp 65001 режет строки UTF-8 посередине: «отвечать» превращается в команду «ечать»
+        for bat in Path(__file__).resolve().parent.parent.glob("*.bat"):
+            self.assertTrue(bat.read_bytes().isascii(), bat.name)
+
+
 class ObsidianSettings(unittest.TestCase):
     def test_note_stays_inside_the_vault(self):
         from pulse.server import clean_note_path, validate_settings

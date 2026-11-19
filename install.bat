@@ -1,14 +1,13 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-echo Ставлю библиотеки Python для Пульса...
-python -m pip install --disable-pip-version-check -r requirements.txt
+where python >nul 2>nul
 if errorlevel 1 (
-  echo.
-  echo Не получилось. Проверьте, что Python 3.12 установлен и при установке была отмечена галочка "Add python.exe to PATH".
+  echo Python not found. Install Python 3.12 from python.org and tick "Add python.exe to PATH".
+  echo See INSTRUKCIYA, step 1.
   pause
   exit /b 1
 )
+python -X utf8 -m pulse install
 echo.
-echo Готово. Дальше запустите telegram_login.bat, а потом start.bat.
 pause
